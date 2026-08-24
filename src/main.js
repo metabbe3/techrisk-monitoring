@@ -208,8 +208,8 @@ async function notifySlackWebhook(meta) {
   }
 }
 
-// DingTalk custom robot: markdown card, keyword-filter compliant ("TR"),
-// findings rendered as an inline CSV block (robots cannot upload files).
+// DingTalk custom robot: markdown card, keyword-filter compliant ("TR").
+// Findings as a GFM table; failure reasons quoted below; deep link to the UI.
 async function notifyDingtalk(meta) {
   const url = process.env.DINGTALK_WEBHOOK;
   if (!url) return;
@@ -217,16 +217,21 @@ async function notifyDingtalk(meta) {
     (s) => ['P1', 'P2', 'CAPTURE FAILED'].includes(s.incidentLevel)
   );
   if (!findings.length) return;
-  const csv = ['Module,Level,AvgChange,Duration,Data',
-    ...findings.map((s) =>
-      `${s.module},${s.incidentLevel},${s.averagePercentage ?? ''}%,${s.durationMinutes ?? ''}min,${s.entriesWithData ?? ''}/${s.entriesWithDate ?? ''}`)]
-    .join('\n');
   const worst = findings.reduce((w, s) => (LEVEL_ORDER[s.incidentLevel] > LEVEL_ORDER[w] ? s.incidentLevel : w), 'P2');
-  const title = `TR alert ${worst}`;
-  const text = `### TR alert: ${worst}\n\n` +
-    `${new Date(meta.generatedAt).toLocaleString('en-SG', { timeZone: 'Asia/Jakarta' })} · ${findings.length} finding(s)\n\n` +
-    '```\n' + csv + '\n```\n\n' +
-    `Full report + screenshots: ${process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL + '/' + meta.dir : 'server output/' + meta.dir}`;
+  const worstMod = findings.find((s) => s.incidentLevel === worst);
+  const label = (m) => LABELS[m] || m;
+  const when = new Date(meta.generatedAt).toLocaleString('en-GB', {
+    timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  }).replace(',', '');
+  const win = worstMod.windows > 1 ? `${worstMod.windows} windows` : '1 window';
+  const title = `TR alert · ${worst} ${label(worstMod.module)} — ${findings.length} finding${findings.length > 1 ? 's' : ''}`;
+  const rows = findings.map((s) =>
+    `| ${label(s.module)} | **${s.incidentLevel}** | ${s.averagePercentage ?? '—'}% | ${fmtDur(s.durationMinutes)} | ${s.entriesWithData ?? '—'}/${s.entriesWithDate ?? '—'} |`);
+  const text = `### TR alert · ${worst}\n\n` +
+    `${when} WIB · compared ${win} · worst: **${label(worstMod.module)} ${worstMod.averagePercentage ?? ''}${worstMod.averagePercentage != null ? '%' : ''} over ${fmtDur(worstMod.durationMinutes)}**\n\n` +
+    '| Module | Level | Avg Δ | Duration | Data |\n|---|---|---:|---|---|\n' + rows.join('\n') + '\n' +
+    findings.filter((s) => s.reason).map((s) => `\n> **${label(s.module)}**: ${s.reason}`).join('') +
+    `\n\n**[→ Open dashboard](${process.env.PUBLIC_BASE_URL || 'http://localhost:8080'})**`;
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -241,6 +246,9 @@ async function notifyDingtalk(meta) {
   }
 }
 const LEVEL_ORDER = { P1: 4, 'CAPTURE FAILED': 3, P2: 2 };
+const LABELS = { trade_trends: 'Trade trends', cashout: 'Cashout', va_topup: 'VA topup', x2x: 'x2x',
+                 hold_login: 'Hold Login', user_register: 'User Register', dana_cicil: 'DANA Cicil' };
+const fmtDur = (m) => m == null ? '—' : m >= 1440 ? `${(m / 1440).toFixed(1)}d` : m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ' ' + (m % 60) + 'm' : ''}` : `${m}m`;
 
 // CLI entry
 const isCli = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
