@@ -253,7 +253,7 @@ const fmtDur = (m) => m == null ? '—' : m >= 1440 ? `${(m / 1440).toFixed(1)}d
 const isCli = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
 if (isCli) {
   const args = parseArgs(process.argv.slice(2));
-  console.log(`Capture: modules=${args.moduleList.join(',')} ${args.from} vs ${args.to} ${args.start}-${args.end}`);
+  console.log(`Capture: modules=${args.moduleList.join(',')} ${args.windowList.map((w) => `${w.from} vs ${w.to} ${w.start}-${w.end}`).join(' | ')}`);
   runCapture(args)
     .then((out) => {
       console.log(`\nDone. Output in ${out.dir}`);

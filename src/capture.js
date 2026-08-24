@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { COMPARE, POPUP } from './selectors.js';
 import { sleep, retry } from './util.js';
-import { aggregate, normalizeTime } from './analytics.js';
+import { aggregate, normalizeTime, normDate } from './analytics.js';
 
 // One comparison-view capture: fill the date/time form, hover the chart link,
 // scrape the stat table, screenshot, close the popup.
@@ -37,7 +37,15 @@ export class ComparisonCapture {
       .map((r) => (r.metric.match(/^(\d{4}-\d{2}-\d{2})/) || [])[1])
       .filter(Boolean))].sort();
     const expected = [entry.from, entry.to].sort();
-    if (queried.length && JSON.stringify(queried) !== JSON.stringify(expected)) {
+    // Rows with no date prefix at all can't be verified against the window —
+    // fail closed instead of trusting them silently (hold_login/user_register
+    // were never confirmed to carry prefixes).
+    if (tableRows.length > 0 && queried.length === 0) {
+      await this.#screenshot(`${moduleCfg.key}_nodateprefix_${index}`, outputDir);
+      await this.#closePopup();
+      throw new Error('cannot verify popup dates: metric rows carry no date prefix');
+    }
+    if (JSON.stringify(queried) !== JSON.stringify(expected)) {
       // keep what the form actually held when this raced — the fix starts here
       await this.#screenshot(`${moduleCfg.key}_datemismatch_${index}`, outputDir);
       await this.#closePopup();
@@ -74,8 +82,8 @@ export class ComparisonCapture {
   async #fillForm(entry) {
     const page = this.page;
     await page.waitForSelector(COMPARE.modal, { timeout: 15000 });
-    await this.#setField(COMPARE.date1, entry.from);
-    await this.#setField(COMPARE.date2, entry.to);
+    await this.#setField(COMPARE.date1, entry.from, true);
+    await this.#setField(COMPARE.date2, entry.to, true);
     await this.#setField(COMPARE.startTime, normalizeTime(entry.start));
     await this.#setField(COMPARE.endTime, normalizeTime(entry.end));
     // Let Angular's digest and the site's on-blur formatters commit before
@@ -83,32 +91,53 @@ export class ComparisonCapture {
     // (audit 2026-08-20: requested 08-18, site queried 08-19). Under server
     // load the digest can outrun 800ms — 1500ms cut the mismatch retries.
     await sleep(1500);
-    // Readback: only proceed when the form shows the dates we asked for.
-    // Soft check (unknown formats fail open) — the popup-date gate in
-    // capture() is the hard enforcement.
-    const shown = await page.$$eval(
-      `${COMPARE.date1}, ${COMPARE.date2}`,
-      (els) => els.map((e) => (e.value || '').trim())
+    // Readback: only click Compare when the form really holds the dates we
+    // asked for. Priority: the scope path (what compare() builds the query
+    // from) → ngModel $modelValue → DOM value (what the old check trusted —
+    // it passes while the model keeps the site defaults, audit 2026-08-24:
+    // trade_trends queried yesterday+today for every window we filled).
+    // Unknown/unreadable formats fail closed: unverifiable form = retry,
+    // never a click-through.
+    const got = await page.evaluate(
+      (sels) =>
+        sels.map((sel) => {
+          const input = document.querySelector(sel);
+          const out = { model: null, scope: null, dom: input ? input.value : null };
+          if (!input || !window.angular) return out;
+          const el = angular.element(input);
+          const ngModel = el.controller('ngModel');
+          const scope = el.scope();
+          const path = input.getAttribute('ng-model');
+          if (ngModel) out.model = String(ngModel.$modelValue ?? '');
+          if (scope && path) out.scope = String(scope.$eval(path) ?? '');
+          return out;
+        }),
+      [COMPARE.date1, COMPARE.date2]
     );
-    const norm = (v) => {
-      let m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
-      if (m) return `${m[1]}-${m[2]}-${m[3]}`;
-      m = v.match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/); // dd/mm/yyyy (site locale)
-      if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
-      return null; // unrecognized display format — don't guess
-    };
-    const got = shown.map(norm);
-    if (got[0] === null || got[1] === null) return page.click(COMPARE.compareBtn);
-    if (got[0] !== entry.from || got[1] !== entry.to) {
-      throw new Error(`form shows ${shown.join(' / ')} but window is ${entry.from}→${entry.to}`);
+    const shown = got.map((r) => normDate(r.scope) || normDate(r.model) || normDate(r.dom));
+    if (
+      got.length < 2 ||
+      shown[0] === null ||
+      shown[1] === null ||
+      shown[0] !== entry.from ||
+      shown[1] !== entry.to
+    ) {
+      throw new Error(
+        `form holds ${JSON.stringify(got.map((r) => r.scope ?? r.dom))} but window is ${entry.from}→${entry.to}`
+      );
     }
     await page.click(COMPARE.compareBtn);
   }
 
   // AngularJS ng-model inputs don't always react to fill() on pre-filled
   // values — blank at DOM level, fill, then dispatch the events the digest
-  // binds to and blur so the site's on-blur formatter commits.
-  async #setField(selector, value) {
+  // binds to and blur so the site's on-blur formatter commits. For the date
+  // pair that is still not enough (audit 2026-08-24: trade_trends queried
+  // the form's defaults for every window while the input readback passed):
+  // force-commit through ngModel's own pipeline and, if the parser rejects
+  // our format, the scope path directly — compare() reads that path to
+  // build the query regardless of the input's validity state.
+  async #setField(selector, value, commitModel = false) {
     const page = this.page;
     await page.waitForSelector(selector, { timeout: 10000 });
     await page.evaluate((sel) => {
@@ -125,6 +154,24 @@ export class ComparisonCapture {
       input.blur();
     }, selector);
     await sleep(300);
+    if (!commitModel) return;
+    await page.evaluate((sel, val) => {
+      const input = document.querySelector(sel);
+      if (!input || !window.angular) return;
+      const el = angular.element(input);
+      const ngModel = el.controller('ngModel');
+      if (ngModel && ngModel.$modelValue !== val) {
+        ngModel.$setViewValue(val);
+        ngModel.$render();
+      }
+      const scope = el.scope();
+      const path = input.getAttribute('ng-model');
+      if (scope && path) {
+        const assign = `${path} = ${JSON.stringify(val)}`;
+        if (scope.$$phase) scope.$eval(assign);
+        else scope.$apply(assign);
+      }
+    }, selector, value);
   }
 
   async #hoverChartLink() {

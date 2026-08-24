@@ -9,6 +9,17 @@ export function normalizeTime(timeStr) {
   return t + ':00:00';
 }
 
+// Date-string normalizer for form/model readback: accepts ISO (what we fill)
+// and the site's dd/mm/yyyy locale; returns ISO or null when unrecognized.
+export function normDate(v) {
+  if (typeof v !== 'string') return null;
+  let m = v.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = v.trim().match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+  if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+  return null; // unrecognized — don't guess
+}
+
 export function pctChange(v1, v2) {
   if (v1 === 0) return v2 === 0 ? 0 : 100;
   return ((v2 - v1) / v1) * 100;
@@ -131,6 +142,10 @@ if (process.argv[1] && process.argv[1].endsWith('analytics.js')) {
   console.assert(incidentLevel(20, -60, rules) === 'P2', 'P2 50% >15min');
   console.assert(incidentLevel(200, -30, rules) === 'P3', 'P3 <50% 2h+');
   console.assert(normalizeTime('09:30') === '09:30:00', 'time norm');
+  console.assert(normDate('2026-08-21') === '2026-08-21', 'date norm ISO');
+  console.assert(normDate('21/08/2026') === '2026-08-21', 'date norm locale');
+  console.assert(normDate('1-8-2026') === '2026-08-01', 'date norm zero-pads');
+  console.assert(normDate('Aug 21') === null, 'date norm rejects junk');
 
   // Band rules: login/register policy matrices (ID-ARC-PRO-02 p.30–31).
   const loginRules = { bands: [
