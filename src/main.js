@@ -213,11 +213,10 @@ async function notifySlackWebhook(meta) {
 async function notifyDingtalk(meta) {
   const url = process.env.DINGTALK_WEBHOOK;
   if (!url) return;
-  const findings = meta.summaries.filter(
-    (s) => ['P1', 'P2', 'CAPTURE FAILED'].includes(s.incidentLevel)
-  );
+  // any P-level + capture failures notify; only a fully clean run stays silent
+  const findings = meta.summaries.filter((s) => s.incidentLevel !== 'No Incident');
   if (!findings.length) return;
-  const worst = findings.reduce((w, s) => (LEVEL_ORDER[s.incidentLevel] > LEVEL_ORDER[w] ? s.incidentLevel : w), 'P2');
+  const worst = findings.reduce((w, s) => (LEVEL_ORDER[s.incidentLevel] > LEVEL_ORDER[w] ? s.incidentLevel : w), 'P4');
   const worstMod = findings.find((s) => s.incidentLevel === worst);
   const label = (m) => LABELS[m] || m;
   const when = new Date(meta.generatedAt).toLocaleString('en-GB', {
@@ -245,7 +244,7 @@ async function notifyDingtalk(meta) {
     console.log(`dingtalk failed: ${e.message}`);
   }
 }
-const LEVEL_ORDER = { P1: 4, 'CAPTURE FAILED': 3, P2: 2 };
+const LEVEL_ORDER = { P1: 6, 'CAPTURE FAILED': 5, P2: 4, P3: 3, P4: 2 }; // DingTalk worst-pick, UI convention
 const LABELS = { trade_trends: 'Trade trends', cashout: 'Cashout', va_topup: 'VA topup', x2x: 'x2x',
                  hold_login: 'Hold Login', user_register: 'User Register', dana_cicil: 'DANA Cicil' };
 const fmtDur = (m) => m == null ? '—' : m >= 1440 ? `${(m / 1440).toFixed(1)}d` : m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ' ' + (m % 60) + 'm' : ''}` : `${m}m`;

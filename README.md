@@ -100,7 +100,7 @@ automatically — newest `RETENTION_RUNS` kept (default 50, `0` = keep forever).
   (pool of 1, 5s connect timeout, single batched insert). `CAPTURE FAILED` runs
   are stored as rows too, so gaps are visible, not silent.
 - `WEBHOOK_URL=...` — POST on **P1 / P2 / CAPTURE FAILED** (Slack-compatible `{text, findings}`)
-- `DINGTALK_WEBHOOK=...` — DingTalk robot: markdown card with findings as an inline CSV block (robots can't upload files; set `PUBLIC_BASE_URL` to link the full report). Keyword filter must include `TR`.
+- `DINGTALK_WEBHOOK=...` — DingTalk robot: one markdown card per run with a findings table (**notifies on P1–P4 + CAPTURE FAILED; only a fully clean run is silent**). Set `PUBLIC_BASE_URL` for the dashboard link; keyword filter must include `TR`.
 - `API_TOKEN=...` — UI/API require `?token=` or `X-API-Token` header (UI prompts once)
 - `CAPTURE_DAILY_AT=07:05` + `CAPTURE_ARGS="--modules all"` + `TZ=Asia/Jakarta` —
   the web container runs the capture itself every day; **no host cron needed**:
