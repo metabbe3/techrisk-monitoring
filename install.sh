@@ -56,6 +56,21 @@ docker network inspect "$DASH_NET" >/dev/null 2>&1 || {
 # ── 4. Build + start (remove-orphans first: no ghost containers) ────────────
 say "Building image…"
 docker compose build --pull
+
+# Port preflight — fail with the culprit named, not a daemon error at start.
+if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} "; then
+  say "Port ${WEB_PORT} is already in use:"
+  (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep ":${WEB_PORT} " || true
+  docker ps --format '  {{.Names}}  {{.Ports}}' | grep "${WEB_PORT}->" || true
+  cat <<HINT
+If that is the previous techrisk deployment, stop it first:
+  docker rm -f <that container name>
+Otherwise pick another port and re-run:
+  WEB_PORT=8081 bash install.sh
+HINT
+  die "port ${WEB_PORT} occupied"
+fi
+
 say "Starting web service…"
 docker compose down --remove-orphans >/dev/null 2>&1 || true
 docker compose up -d web
