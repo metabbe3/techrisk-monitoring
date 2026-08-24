@@ -1,0 +1,920 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TechRisk Monitor</title>
+<style>
+  /* ── tokens ─────────────────────────────────────────────────────────────
+     Light, restrained. Severity owns all strong color (AA: ≥4.5:1). */
+  :root {
+    --sev-1: #bb2d3b; --sev-2: #b45309; --sev-3: #2563eb; --sev-4: #6b727c;
+    --sev-ok: #2f9e6e; --sev-fail: #1f2530;
+    --ink: #1f2530; --ink-2: #5b6472; --line: #e3e7ec; --surface: #fff; --bg: #f5f6f8;
+    --accent: #2563eb;
+    --ok-tint: #dff2e9; --ok-ink: #1d6b4c; --run-tint: #f7ecd9; --run-ink: #8a4b04;
+    --hover-tint: #fafbfc; --th-band: #f8f9fb; --sel-tint: #dbe5fb; /* hover = Hover Wash, neutral */
+    /* dense dashboard scale */
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
+    --r: 8px;
+    --ease-out: cubic-bezier(.16, 1, .3, 1); /* confident arrivals, no bounce */
+  }
+  * { box-sizing: border-box; }
+  html { font-feature-settings: "tnum" 1; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  h1, h2, h3, h4 { margin: 0; font-weight: 650; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:hover { text-decoration: underline; }
+  ::selection { background: #dbe5fb; } /* instrument-blue tint — the palette's own highlight */
+  .num { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--ink-2) !important; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 var(--s4); }
+
+  /* focus + cursor: every interactive target */
+  :is(button, select, input, a, .row-head, .shot-grid img, #legend):focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px;
+  }
+  button, select, .row-head, .shot-grid img { cursor: pointer; }
+
+  /* ── controls ─────────────────────────────────────────────────────────── */
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+         background: var(--surface); color: var(--ink); font: inherit; font-weight: 550;
+         padding: 4px 14px; border-radius: 6px; height: 32px;
+         transition: background 150ms ease-out, border-color 150ms ease-out; }
+  .btn:hover { background: var(--hover-tint); border-color: #cdd4dc; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff;
+                 min-width: 120px; justify-content: center; }
+  .btn.primary:hover { background: #1d4fc4; }
+  .btn.primary:active { background: #1d4fc4; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .ctl { font: inherit; font-weight: 550; color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+         border-radius: 6px; padding: 4px 8px; height: 32px; caret-color: var(--accent); }
+  /* Dropdowns are system citizens, not native guests: the ledger's own chevron,
+     button-grade text weight, and a pixel-identical 32px box. */
+  select.ctl { appearance: none; -webkit-appearance: none; padding-right: 28px;
+               background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%235b6472' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 9px center; }
+  select.ctl:hover { border-color: #cdd4dc; }
+  .ctl:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ctl.err { border-color: var(--sev-1); }
+  .err { color: var(--sev-1); font-weight: 550; }
+  button.link { font: inherit; font-size: 12px; color: var(--accent); background: none; border: 0;
+                display: inline-flex; align-items: center; min-height: 32px; padding: 4px 2px;
+                cursor: pointer; border-bottom: 1px dotted var(--ink-2); }
+  label.flabel { display: block; font-size: 11px; font-weight: 600; letter-spacing: .04em;
+                 text-transform: uppercase; color: var(--ink-2); margin-bottom: 4px; }
+  .check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 550; }
+  .check input { width: 15px; height: 15px; accent-color: var(--accent); }
+
+  /* Module toggle chips: .btn anatomy as a pill, checked = accent border + selection tint */
+  .chip { display: inline-flex; align-items: center; height: 32px; padding: 4px 12px; border-radius: 999px;
+          border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-weight: 550;
+          cursor: pointer; user-select: none;
+          transition: background 150ms ease-out, border-color 150ms ease-out; }
+  .chip:hover { border-color: #cdd4dc; background: var(--hover-tint); }
+  .chip:has(input:checked) { border-color: var(--accent); background: var(--sel-tint); }
+  .chip input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .chip:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ── header ───────────────────────────────────────────────────────────── */
+  .top { border-bottom: 1px solid var(--sel-tint); background: var(--surface); }
+  .top .wrap { display: flex; align-items: center; gap: var(--s3); height: 52px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 10px;
+          border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); background: var(--surface);
+          transition: background 200ms ease-out, border-color 200ms ease-out, color 200ms ease-out; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--sev-4); }
+  .pill.live .dot { background: var(--sev-ok); }
+  .pill.busy .dot { background: var(--sev-2); animation: pulse 1s infinite; }
+  .pill.live { background: var(--ok-tint); border-color: #c9e8da; color: var(--ok-ink); }
+  .pill.busy { background: var(--run-tint); border-color: #e5c891; color: var(--run-ink); }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* ── severity ─────────────────────────────────────────────────────────── */
+  .sev { display: inline-flex; align-items: center; gap: .4em; font-weight: 600; font-size: 12px;
+         letter-spacing: .01em; padding: 2px 10px; border-radius: 999px; white-space: nowrap; }
+  .sev-P1 { background: var(--sev-1); color: #fff; }
+  .sev-P2 { background: var(--sev-2); color: #fff; }
+  .sev-P3 { background: var(--sev-3); color: #fff; }
+  .sev-P4 { background: var(--sev-4); color: #fff; }
+  .sev-OK { background: #dff2e9; color: #1d6b4c; }
+  .sev-FAIL { background: var(--sev-fail); color: #fff; }
+  .sev-RUN { background: #f7ecd9; color: #8a4b04; }
+  .delta-neg { color: var(--sev-1); }
+  .delta-pos { color: #1d6b4c; }
+
+  /* ── hero / panel / rows ──────────────────────────────────────────────── */
+  .hero { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); margin-bottom: var(--s3); }
+  .hero.empty { padding: 36px 24px; text-align: center; }
+  .hero-head { display: flex; align-items: center; gap: 14px; padding: var(--s4) 20px; flex-wrap: wrap; }
+  .hero-level { font-size: 15px; }
+  .hero-meta { color: var(--ink-2); font-size: 13px; }
+
+  .row-item { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); margin-bottom: var(--s2); }
+  .row-head { display: flex; align-items: center; gap: 12px; padding: 10px var(--s4);
+              transition: background 150ms ease-out; }
+  .row-head:hover { background: var(--hover-tint); }
+  .row-head .chev { color: var(--ink-2); transition: transform 150ms ease-out; }
+  .row-item.open .chev { transform: rotate(90deg); }
+  /* Accordion reveal: 0fr→1fr grid rows (no layout-property animation); delayed
+     visibility keeps collapsed content out of the tab order, like display:none did. */
+  .row-body { display: grid; grid-template-rows: 0fr; visibility: hidden;
+              transition: grid-template-rows 220ms var(--ease-out), visibility 0s 220ms; }
+  .row-body-in { overflow: hidden; min-height: 0; padding: 0 var(--s4); }
+  /* vertical spacing as child margins — block padding on the 0fr item won't collapse to 0 */
+  .row-body-in > :first-child { margin-top: 4px; }
+  .row-body-in > :last-child { margin-bottom: 14px; }
+  .row-item.open .row-body { grid-template-rows: 1fr; visibility: visible;
+              transition: grid-template-rows 220ms var(--ease-out), visibility 0s 0s; }
+
+  table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.grid th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase;
+                  letter-spacing: .04em; color: var(--ink-2); padding: 6px 10px; border-bottom: 1px solid var(--line);
+                  background: var(--th-band); }
+  table.grid td { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  table.grid tr:last-child td { border-bottom: 0; }
+  .tbl-wrap { overflow-x: auto; }
+
+  /* screenshots: reserved space, no CLS */
+  .shot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--s3); }
+  .shot-grid figure { margin: 0; }
+  .shot-grid .imgbox { aspect-ratio: 16 / 9; border: 1px solid var(--line); border-radius: 6px;
+                       overflow: hidden; background: #eef0f3; }
+  .shot-grid img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  figcaption { color: var(--ink-2); font-size: 11px; margin-top: 4px; }
+  /* screenshot caption: quiet context row, loud measurement row */
+  .shot-cap { display: grid; gap: 2px; margin-top: 6px; }
+  .shot-cap .ctx { font-size: 11px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shot-cap .mod { color: var(--ink); font-weight: 650; font-size: 12px; }
+  .shot-vals { font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .shot-vals .arrow { color: var(--ink-2); }
+  .delta-chip { font-size: 13px; font-weight: 650; padding: 1px 8px; border-radius: 999px; white-space: nowrap; margin-left: auto; }
+  .delta-chip.neg { background: #f7e3e6; color: var(--sev-1); }
+  .delta-chip.pos { background: var(--ok-tint); color: var(--ok-ink); }
+
+  /* lightbox + token entry: native <dialog> — Escape, focus trap, aria-modal for free */
+  dialog.lb, dialog.tok { border: 0; padding: 0; background: none; }
+  dialog.lb::backdrop, dialog.tok::backdrop { background: #1f2530b3; animation: bkfade 240ms ease-out both; }
+  dialog.lb img { max-width: 92vw; max-height: 88vh; border-radius: 8px; background: #fff;
+                  cursor: zoom-out; box-shadow: 0 24px 80px #0006; }
+  dialog.tok form { background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+                    padding: var(--s4); width: 340px; display: grid; gap: var(--s3); }
+  dialog.lb[open] img, dialog.tok[open] form { animation: pop-in 240ms var(--ease-out); }
+  @keyframes bkfade { from { opacity: 0; } }
+
+  /* skeletons, not spinners */
+  .skel { border-radius: 6px; background: linear-gradient(90deg, #e9eef8 25%, #f2f5fb 50%, #e9eef8 75%);
+          background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+  @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .step-log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+              color: var(--ink-2); max-height: 110px; overflow: auto;
+              scrollbar-width: thin; scrollbar-color: #cdd4dc transparent; }
+  .step-log > div { animation: line-in 160ms ease-out; } /* appended feed lines rise in */
+  .bar { height: 3px; border-radius: 2px; background: #f0e2c8; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 34%; background: var(--sev-2); border-radius: 2px;
+             animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-120%); } 100% { transform: translateX(400%); } }
+
+  /* ── motion vocabulary ───────────────────────────────────────────────────
+     Transform + opacity + grid-rows only. The authored moment is the verdict
+     handoff: a finished capture's hero arrives and its badge stamps in. */
+  @keyframes arrive { from { opacity: 0; transform: translateY(4px); } }
+  @keyframes stamp { from { transform: scale(1.12); } }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(-4px); } }
+  @keyframes line-in { from { opacity: 0; transform: translateY(-2px); } }
+  .hero.fresh { animation: arrive 320ms var(--ease-out); }
+  .hero.fresh .hero-level { animation: stamp 300ms 60ms var(--ease-out) backwards; }
+  .win { animation: arrive 200ms var(--ease-out); } /* added comparison windows settle in */
+  .shot-grid img { opacity: 0; transition: opacity 240ms ease-out; } /* fade on load, no pop */
+  .shot-grid img.ld { opacity: 1; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skel { animation: none; } .bar > i { animation: none; transform: none; width: 100%; }
+    .row-head, .chev, .btn { transition: none; } .pill.busy .dot { animation: none; }
+    .row-body, #request-form { transition: none; } /* instant reveal, same end state */
+    .hero.fresh, .hero.fresh .hero-level, .win, .step-log > div,
+    dialog.lb[open] img, dialog.tok[open] form,
+    dialog.lb::backdrop, dialog.tok::backdrop, .legend-pop.show { animation: none; }
+    .shot-grid img { transition: none; opacity: 1; }
+  }
+
+  /* ── layout helpers ───────────────────────────────────────────────────── */
+  .grid-form { display: grid; grid-template-columns: 1fr 2fr; gap: var(--s4); }
+  @media (max-width: 768px) { .grid-form { grid-template-columns: 1fr; } }
+  /* Collapsible request form: same 0fr→1fr reveal as history rows. Spacing to the
+     next section lives on the clipped inner wrapper so it collapses with the form. */
+  #request-form { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
+  #request-form.open { grid-template-rows: 1fr; }
+  #request-form .form-in { overflow: hidden; min-height: 0; }
+  #request-form .hero { margin-bottom: var(--s4); } /* clips with the wrapper — block padding there wouldn't */
+  .win { margin-bottom: var(--s2); }
+  .win-cap { margin: 0 0 4px; }
+  /* 32px action column reserved on every row (empty on row 1) so all windows share identical tracks.
+     s1 field gap + full-width inputs — the four fields read as one connected box. */
+  .win-row { display: grid; grid-template-columns: repeat(4, 1fr) 32px; gap: var(--s1); align-items: end; }
+  .win-row .ctl { width: 100%; } /* native date/time inputs have intrinsic widths that leave dead space */
+  @media (max-width: 640px) {
+    .win-row { grid-template-columns: 1fr 1fr; }
+    .win-row .w-del { grid-column: 1 / -1; justify-self: end; }
+    /* evidence must never overflow the phone: one column, captions may wrap */
+    .shot-grid { grid-template-columns: 1fr; }
+    .shot-vals { flex-wrap: wrap; }
+    .delta-chip { margin-left: 0; }
+  }
+  .filters { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: end; margin-bottom: var(--s3); }
+  .filters > div > label.flabel { margin-bottom: 4px; }
+
+  .legend-pop { display: none; position: absolute; z-index: 50; right: 0; top: calc(100% + 6px); background: var(--surface);
+                border: 1px solid var(--line); border-radius: var(--r); padding: var(--s3) 14px; width: 460px;
+                max-width: 86vw; box-shadow: 0 12px 40px #0002; font-size: 12px; }
+  .legend-pop.show { display: block; animation: pop-in 180ms var(--ease-out); }
+  .legend-pop .sev { margin-right: 6px; }
+  .legend-pop summary { font-size: 12px; color: var(--accent); cursor: pointer; user-select: none;
+                        display: inline-flex; align-items: center; min-height: 32px;
+                        border-bottom: 1px dotted var(--ink-2); }
+  .legend-pop summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .legend-pop details > div { margin-top: 6px; }
+
+  /* pager */
+  .pager { display: flex; gap: 4px; list-style: none; padding: 0; margin: var(--s3) 0 var(--s5); }
+  .pager a, .pager span { display: inline-flex; align-items: center; justify-content: center; min-width: 30px;
+                          height: 32px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--line);
+                          background: var(--surface); color: var(--ink); font-size: 13px; text-decoration: none; }
+  .pager .on :is(a, span) { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pager .off { opacity: .45; pointer-events: none; }
+
+  .spacer { margin-left: auto; }
+  section.body { padding: var(--s5) 0 var(--s5); }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/>
+      </svg>
+      TechRisk Monitor
+    </div>
+    <div class="spacer"></div>
+    <span id="sse-pill" class="pill"><span class="dot"></span><span id="sse-text">connecting</span></span>
+    <span id="status-pill" class="pill"><span class="dot"></span><span id="status-text">…</span></span>
+    <button id="login" class="btn" style="display:none">Token</button>
+    <span id="sr-status" class="sr" role="status" aria-live="polite"></span>
+  </div>
+</header>
+
+<div class="wrap">
+<section class="body">
+
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:var(--s4)">
+    <div class="muted" style="font-size:13px">Captures run on demand. The newest result below is the current status.</div>
+    <div class="spacer"></div>
+    <button id="form-toggle" class="btn primary">New capture</button>
+  </div>
+
+  <!-- Request capture (demoted) -->
+  <div id="request-form">
+    <div class="form-in">
+    <div class="hero">
+      <div class="hero-head">
+        <div style="font-weight:650">Request capture</div>
+        <div class="hero-meta">compare the same hours on two dates, per window</div>
+      </div>
+      <div style="padding:var(--s3) 20px 18px;border-top:1px solid var(--line)">
+        <div class="grid-form">
+          <div>
+            <label class="flabel">Modules</label>
+            <div id="mod-chips" style="display:flex;flex-wrap:wrap;gap:var(--s2);padding-top:4px"></div>
+          </div>
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <label class="flabel" style="margin:0">Comparison windows</label>
+              <span class="muted" style="font-size:11px">one per drop · add next day if incident crosses midnight</span>
+              <button type="button" id="add-window" class="btn spacer" style="padding:2px 8px">+ window</button>
+            </div>
+            <div id="windows"></div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:var(--s3);padding-top:var(--s3);border-top:1px solid var(--line)">
+          <button id="run" class="btn primary">Run capture</button>
+          <span id="run-msg" class="muted" style="font-size:13px" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:8px">
+    <h2 style="font-size:15px">Results</h2>
+    <span class="muted" style="font-size:12px" id="result-count" role="status" aria-live="polite"></span>
+  </div>
+
+  <div class="filters" style="position:relative">
+    <div><label class="flabel" for="f-level">Level</label>
+      <select id="f-level" class="ctl">
+        <option value="">All</option><option>P1</option><option>P2</option><option>P3</option>
+        <option>P4</option><option>No Incident</option><option>CAPTURE FAILED</option>
+      </select></div>
+    <div><label class="flabel" for="f-module">Module</label>
+      <select id="f-module" class="ctl"><option value="">All</option></select></div>
+    <div><label class="flabel" for="f-from">From</label><input type="date" id="f-from" class="ctl"></div>
+    <div><label class="flabel" for="f-to">To</label><input type="date" id="f-to" class="ctl"></div>
+    <div><label class="flabel" for="f-size">Size</label>
+      <select id="f-size" class="ctl"><option>10</option><option>25</option><option>50</option></select></div>
+    <button id="f-clear" class="btn">Clear</button>
+    <button type="button" class="link" id="legend-open" aria-expanded="false" aria-controls="legend">P-levels?</button>
+    <div id="legend" class="legend-pop" tabindex="-1">
+      <div style="font-weight:650;margin-bottom:8px">How P-levels are determined</div>
+      <div style="margin-bottom:4px"><span class="sev sev-P1">P1</span> 100% drop &gt; 15 min, or ≥50% drop ≥ 120 min</div>
+      <div style="margin-bottom:4px"><span class="sev sev-P2">P2</span> 20–50% drop ≥ 720 min, or ≥50% drop &gt; 15 min</div>
+      <div style="margin-bottom:4px"><span class="sev sev-P3">P3</span> &lt;50% drop ≥ 120 min</div>
+      <div style="margin-bottom:4px"><span class="sev sev-P4">P4</span> any drop &gt; 15 min</div>
+      <div style="margin-bottom:4px"><span class="sev sev-OK">No Incident</span> no drop measured</div>
+      <div style="margin-bottom:8px"><span class="sev sev-FAIL">CAPTURE FAILED</span> nothing measured — site error, not "healthy"</div>
+      <details>
+        <summary>Per-module thresholds</summary>
+        <div class="muted">Percentage = compare window vs baseline window (negative = drop). Duration = window length; across windows the worst level wins and durations add up. Example: 75-minute window at −60% → P2.<br>
+        Per-module (ATI policy ID-ARC-PRO-02): trade_trends = the table above (zero → P1 at 15 min). VA topup &amp; x2x (Topup / P2P): total outage or ≥50% drop → P2, P1 at 6 h; 20–50% → P4, P3 at 6 h, P2 at 12 h. Cashout (non-critical fn): any drop → P4, P3 at 6 h, P2 at 12 h; total outage → P2, P1 at 6 h.<br>
+        Hold Login: ≥50% drop → P2, 30–50% → P3, &lt;30% → P4 — each escalates one level at 6 h. User Register: ≥50% → P3, &lt;50% → P4, one level up at 6 h (15-min averages).<br>
+        DANA Cicil thresholds are absolute success counts, not percentages (Edik V.5.0): zero → P1; ≤10 → P2, P1 at 2 h; ≤29 → P4, P3 at 2 h, P2 at 12 h; ≤41 → P4, P3 at 2 h; &gt;41 → below every cap.</div>
+      </details>
+    </div>
+  </div>
+
+  <div id="runs">
+    <div class="hero">
+      <div style="height:52px;border-bottom:1px solid var(--line)" class="skel"></div>
+      <div style="padding:14px 12px">
+        <div class="skel" style="height:16px;width:22%;margin-bottom:10px"></div>
+        <div class="skel" style="height:16px;width:16%;margin-bottom:10px"></div>
+        <div class="skel" style="height:16px;width:19%"></div>
+      </div>
+    </div>
+  </div>
+  <ul class="pager" id="pager"></ul>
+
+</section>
+</div>
+
+<dialog class="lb" id="lightbox" aria-label="Screenshot viewer"></dialog>
+<dialog class="tok" id="token-dialog" aria-label="API token">
+  <form method="dialog">
+    <label class="flabel" for="tok-input">API token</label>
+    <input class="ctl" id="tok-input" autocomplete="off">
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button type="submit" class="btn primary" value="save">Save</button>
+      <button type="submit" class="btn" value="cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+
+// Screenshots fade in once they actually load (capture-phase so <img> targets it;
+// 'error' too so a broken image never stays invisible).
+const shotLd = (e) => { if (e.target.matches?.('.shot-grid img')) e.target.classList.add('ld'); };
+document.addEventListener('load', shotLd, true);
+document.addEventListener('error', shotLd, true);
+
+// Token-aware fetch (server requires one when API_TOKEN is set).
+const token = () => localStorage.getItem('token');
+const qs = (p) => token() ? p + (p.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token()) : p;
+async function api(path, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (token()) headers['X-API-Token'] = token();
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401 && !opts._retried) {
+    const t = await askToken();
+    if (t) { localStorage.setItem('token', t); return api(path, { ...opts, _retried: true }); }
+  }
+  return r;
+}
+// Token entry as a native <dialog> (method="dialog" form): Enter saves, Escape cancels.
+function askToken() {
+  const dlg = $('#token-dialog'), input = $('#tok-input');
+  input.value = token() || '';
+  dlg.showModal();
+  return new Promise(res => dlg.addEventListener('close', () =>
+    res(dlg.returnValue === 'save' && input.value.trim() ? input.value.trim() : null), { once: true }));
+}
+
+const LEVEL_RANK = { P1: 6, 'CAPTURE FAILED': 5, P2: 4, P3: 3, P4: 2, 'No Incident': 1 };
+const worstLevel = (summaries) => summaries.reduce((w, s) => (LEVEL_RANK[s.incidentLevel] > LEVEL_RANK[w] ? s.incidentLevel : w), 'No Incident');
+
+const sevClass = { P1: 'sev-P1', P2: 'sev-P2', P3: 'sev-P3', P4: 'sev-P4', 'No Incident': 'sev-OK', 'CAPTURE FAILED': 'sev-FAIL', RUNNING: 'sev-RUN' };
+const badge = (level, cls = '') => `<span class="sev ${sevClass[level] || 'sev-P4'} ${cls}">${level === 'No Incident' ? 'No Incident' : level === 'RUNNING' ? 'running' : level}</span>`;
+// A module was only "measured" when at least one window produced data —
+// otherwise any % shown would be fabricated. 0% measured is still a real value.
+const measured = (s) => s.incidentLevel !== 'CAPTURE FAILED' && (s.entriesWithData ?? 1) > 0;
+const pct = (s) => !measured(s) || s.averagePercentage === null || s.averagePercentage === undefined
+  ? '<span class="muted" title="nothing was measured — site error, not healthy">not measured<span class="sr"> — nothing was measured, site error, not healthy</span></span>'
+  : `<span class="num ${s.averagePercentage < 0 ? 'delta-neg' : 'delta-pos'}" style="font-weight:600">${s.averagePercentage}%</span>`;
+
+// Display name for a module id — raw id stays in values, filters, args, API.
+const MODULE_LABELS = { trade_trends: 'Trade trends', cashout: 'Cashout', va_topup: 'VA topup', x2x: 'x2x',
+                        hold_login: 'Hold Login', user_register: 'User Register', dana_cicil: 'DANA Cicil' };
+const disp = (m) => MODULE_LABELS[m] || (m || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+const relText = (iso) => {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000); // clock-skew guard
+  return s < 60 ? `${Math.floor(s)}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
+};
+const rel = (iso) => `<span class="rel" data-iso="${iso}" title="${new Date(iso).toLocaleString()}">${relText(iso)}</span>`;
+const fmt = (n) => n === null || n === undefined ? '—' : (+n).toLocaleString();
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+// Failure reasons carry the actionable why — cut at a sentence boundary, keep
+// the full text one hover away (title) instead of amputating at 100 chars.
+const clipReason = (s) => {
+  const t = String(s);
+  if (t.length <= 120) return t;
+  const cut = t.slice(0, 140);
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '), cut.lastIndexOf(', '));
+  return (stop > 60 ? t.slice(0, stop + 1) : cut.trim()) + '…';
+};
+const nWins = (n) => `${n} window${n > 1 ? 's' : ''}`;
+// Quiet, archival finish notice: no flashing, one title prefix, cleared on focus.
+const baseTitle = document.title;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) document.title = baseTitle; });
+// Relative times tick without re-rendering the list.
+setInterval(() => $$('.rel').forEach(el => { el.textContent = relText(el.dataset.iso); }), 30000);
+
+function runTitle(run, fullDates = false) {
+  const e = run.entries;
+  if (!e) return run.task;
+  const mods = e.modules?.length === modCount ? 'all modules' : (e.modules || []).map(disp).join(', ');
+  const d = (x) => fullDates ? x : x.slice(5); // compact MM-DD; full keeps the year (title tooltips)
+  if (e.windows?.length) {
+    return `${mods} · ${e.windows.length} window${e.windows.length > 1 ? 's' : ''}: ${e.windows.map(w =>
+      `${d(w.from)} vs ${d(w.to)} ${w.start === '00:00:00' && w.end === '23:59:59' ? 'full day' : w.start.slice(0, 5) + '–' + w.end.slice(0, 5)}`).join(' · ')}`;
+  }
+  const full = e.start === '00:00:00' && e.end === '23:59:59';
+  return `${mods} · ${e.from} vs ${e.to}${full ? ' · full day' : ` · ${e.start.slice(0, 5)}–${e.end.slice(0, 5)}`}`;
+}
+
+// ── filters + pagination ─────────────────────────────────────────────────
+// Filter/page state lives in the hash — refresh and share keep the view.
+const filt = { level: '', module: '', from: '', to: '', page: 1, size: 10 };
+{ const h = new URLSearchParams(location.hash.slice(1));
+  for (const k of ['level', 'module', 'from', 'to', 'size']) if (h.get(k)) filt[k] = h.get(k);
+  filt.page = Math.max(1, +h.get('page') || 1); filt.size = +filt.size || 10; }
+let allRuns = [];
+// "Fresh" marks a meaningful arrival (first load, retry recovery, run start/finish) —
+// only then does the top card animate in. Filter/page re-renders stay instant.
+let fresh = true;
+// Pager window: all pages when few, else 1 2 … current±1 … last-1 last.
+const pageList = (cur, pages) => {
+  if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+  const want = new Set([1, 2, pages - 1, pages]);
+  for (let p = Math.max(1, cur - 2); p <= Math.min(pages, cur + 2); p++) want.add(p);
+  const out = [];
+  for (let p = 1; p <= pages; p++) {
+    if (want.has(p)) out.push(p);
+    else if (out[out.length - 1] !== '…') out.push('…');
+  }
+  return out;
+};
+function applyFilters() {
+  return allRuns.filter(r => {
+    if (r.running) return true; // live card always visible — silently hiding it mid-run would alarm
+    if (filt.level && worstLevel(r.summaries) !== filt.level) return false;
+    if (filt.module && !r.summaries.some(s => s.module === filt.module)) return false;
+    const d = new Date(r.generatedAt).toISOString().slice(0, 10);
+    if (filt.from && d < filt.from) return false;
+    if (filt.to && d > filt.to) return false;
+    return true;
+  });
+}
+function bindFilters() {
+  for (const [id, key] of [['f-level','level'],['f-module','module'],['f-from','from'],['f-to','to']]) {
+    $('#' + id).value = filt[key];
+    $('#' + id).addEventListener('change', e => { filt[key] = e.target.value; filt.page = 1; renderList(); });
+  }
+  $('#f-size').value = filt.size;
+  $('#f-size').addEventListener('change', e => { filt.size = +e.target.value; filt.page = 1; renderList(); });
+  $('#f-clear').addEventListener('click', () => {
+    filt.level = filt.module = filt.from = filt.to = ''; filt.page = 1;
+    for (const id of ['f-level','f-module','f-from','f-to']) $('#' + id).value = '';
+    renderList();
+  });
+  const lg = $('#legend'), lo = $('#legend-open');
+  const closeLegend = () => { lg.classList.remove('show'); lo.setAttribute('aria-expanded', 'false'); };
+  lo.addEventListener('click', (e) => { e.stopPropagation();
+    const open = !lg.classList.contains('show');
+    lg.classList.toggle('show', open);
+    lo.setAttribute('aria-expanded', open);
+    if (open) lg.focus(); }); // screen readers land on the appeared content, not behind it
+  document.addEventListener('click', (e) => { if (!lg.contains(e.target) && e.target !== lo) closeLegend(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && lg.classList.contains('show')) { closeLegend(); lo.focus(); } });
+}
+
+// ── form ─────────────────────────────────────────────────────────────────
+$('#form-toggle').onclick = () => {
+  const f = $('#request-form');
+  const open = !f.classList.contains('open');
+  f.classList.toggle('open', open);
+  $('#form-toggle').textContent = open ? 'Close' : 'New capture';
+  // one primary per view: the open form's "Run capture" takes the weight
+  $('#form-toggle').classList.toggle('primary', !open);
+};
+const iso = (d) => d.toISOString().slice(0, 10);
+// Fields start empty like the filters — no assumed dates; empty times mean the full day.
+const winTpl = (i) => `
+  <div class="win">
+    ${i > 0 ? `<div class="flabel win-cap">Window ${i + 1}</div>` : ''}
+    <div class="win-row">
+      <div>${i > 0 ? '' : '<label class="flabel">Baseline (from)</label>'}<input type="date" class="ctl w-from" aria-label="window ${i + 1} baseline date"></div>
+      <div>${i > 0 ? '' : '<label class="flabel">Compare (to)</label>'}<input type="date" class="ctl w-to" aria-label="window ${i + 1} compare date"></div>
+      <div>${i > 0 ? '' : '<label class="flabel">Start</label> <span class="muted" style="font-size:11px">(empty = 00:00)</span>'}<input type="time" step="1" class="ctl w-start" aria-label="window ${i + 1} start time"></div>
+      <div>${i > 0 ? '' : '<label class="flabel">End</label> <span class="muted" style="font-size:11px">(empty = 23:59)</span>'}<input type="time" step="1" class="ctl w-end" aria-label="window ${i + 1} end time"></div>
+      <div>${i > 0 ? '<button type="button" class="btn w-del" style="padding:2px 8px" aria-label="remove window ' + (i + 1) + '">✕</button>' : ''}</div>
+    </div>
+  </div>`;
+function renderWindows() {
+  $('#windows').insertAdjacentHTML('beforeend', winTpl($$('.win').length));
+  const all = $$('.win');
+  const last = all[all.length - 1];
+  last.querySelector('.w-del')?.addEventListener('click', () => last.remove());
+}
+renderWindows();
+$('#add-window').onclick = renderWindows;
+
+// Inline validation + status line (aria-live), never alert().
+const setMsg = (msg, isErr = false) => { const m = $('#run-msg'); m.textContent = msg; m.className = isErr ? 'err' : 'muted'; };
+
+$('#run').onclick = async () => {
+  setMsg('');
+  const mods = $$('input[name=mod]:checked').map(i => i.value);
+  if (!mods.length) return setMsg('Pick at least one module.', true);
+  const today = iso(new Date());
+  const wins = [];
+  for (const [i, row] of $$('.win-row').entries()) {
+    for (const el of row.querySelectorAll('.ctl')) el.classList.remove('err');
+    const w = { from: row.querySelector('.w-from').value, to: row.querySelector('.w-to').value,
+                start: row.querySelector('.w-start').value || '00:00:00', end: row.querySelector('.w-end').value || '23:59:59' };
+    if (!w.from && !w.to) continue; // untouched row
+    const mark = (...cls) => cls.forEach(c => row.querySelector(c).classList.add('err'));
+    if (!w.from || !w.to) { mark(!w.from ? '.w-from' : '.w-to'); return setMsg(`Window ${i + 1}: pick both dates.`, true); }
+    if (w.from >= w.to) { mark('.w-from', '.w-to'); return setMsg(`Window ${i + 1}: baseline (from) must be before the compare date (to).`, true); }
+    if (w.to > today) { mark('.w-to'); return setMsg(`Window ${i + 1}: compare date is in the future — no data exists yet.`, true); }
+    if (w.start >= w.end) { mark('.w-start', '.w-end'); return setMsg(`Window ${i + 1}: end must be after start. Add the next day as its own window if the incident crosses midnight.`, true); }
+    wins.push(w);
+  }
+  if (!wins.length) return setMsg('Add at least one comparison window.', true);
+  if (mods.includes('va_topup') && wins.some(w => w.from < iso(new Date(Date.now() - 3 * 864e5))))
+    setMsg('Note: VA topup only keeps ~3 days of data — an older baseline may come back “no data”.');
+  await submitCapture(`--modules ${mods.join(',')} ` +
+    wins.map(w => `--window ${w.from},${w.to},${w.start},${w.end}`).join(' '), mods);
+};
+
+async function submitCapture(args, mods) {
+  let r, body = {};
+  try { r = await api('/api/capture?args=' + encodeURIComponent(args), { method: 'POST' }); body = await r.json().catch(() => ({})); }
+  catch { return setMsg("Couldn't reach the server — check it's running.", true); }
+  if (r.status === 409) return setMsg(body.error || 'A capture is already running.', true);
+  if (!r.ok) return setMsg(body.error || `Capture request failed (${r.status}).`, true);
+  setMsg(`Running ${(mods || []).join(', ')}…`);
+  $('#run').disabled = true;
+  $('#form-toggle').click(); // collapse form — results own the page
+}
+
+// Re-run a past run from its stored entries (windows mode or flat mode).
+function rerun(run) {
+  const e = run.entries;
+  const args = e.windows?.length
+    ? `--modules ${e.modules.join(',')} ` + e.windows.map(w => `--window ${w.from},${w.to},${w.start},${w.end}`).join(' ')
+    : `--modules ${e.modules.join(',')} --from ${e.from} --to ${e.to} --start ${e.start} --end ${e.end}`;
+  submitCapture(args, e.modules);
+}
+
+// Downloads go through fetch so the token stays in a header, never a URL.
+// Failure feeds back at the point of action — the button itself becomes the retry.
+async function dl(btn) {
+  const { dl: path, name } = btn.dataset;
+  const r = await api(path).catch(() => null);
+  if (!r || !r.ok) {
+    const orig = btn.textContent;
+    btn.textContent = 'download failed — retry';
+    btn.classList.add('err');
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('err'); }, 4000);
+    return;
+  }
+  const u = URL.createObjectURL(await r.blob());
+  Object.assign(document.createElement('a'), { href: u, download: name }).click();
+  URL.revokeObjectURL(u);
+}
+document.addEventListener('click', (e) => {
+  const d = e.target.closest('[data-dl]');
+  if (d) return dl(d);
+  const rr = e.target.closest('[data-rerun]');
+  if (rr) { const run = allRuns.find(r2 => r2.dir === rr.dataset.rerun); if (run) rerun(run); }
+});
+
+// ── rendering ────────────────────────────────────────────────────────────
+function moduleCells(s) {
+  return `<tr>
+    <td style="font-weight:600">${disp(s.module)}</td>
+    <td>${badge(s.incidentLevel)}${s.reason ? `<div class="muted" style="font-size:11px;margin-top:3px" title="${esc(s.reason)}">${clipReason(s.reason)}</div>` : ''}</td>
+    <td>${pct(s)}</td>
+    <td class="num">${s.durationMinutes ?? '—'} min${s.windows > 1 ? ` <span class="muted" style="font-size:11px">(${s.windows}w)</span>` : ''}</td>
+    <td class="num muted">${s.entriesWithData}/${s.entriesWithDate}</td>
+  </tr>`;
+}
+const gridHead = `<thead><tr><th scope="col">Module</th><th scope="col">Level</th><th scope="col">Avg change</th><th scope="col">Duration</th><th scope="col" title="comparison windows that produced data ÷ windows queried — 0/2 means the site returned nothing, not that nothing dropped">Data</th></tr></thead>`;
+const actions = (run) => `
+        <button type="button" class="btn" data-dl="/output/${run.dir}/report.csv" data-name="report.csv">report.csv ↓</button>
+        <button type="button" class="btn" data-dl="/api/runs/${run.dir}" data-name="${run.dir}.json">JSON ↓</button>
+        <button type="button" class="btn" data-rerun="${run.dir}" title="Run this exact configuration again">Re-run</button>`;
+
+function heroRun(run) {
+  const worst = worstLevel(run.summaries);
+  return `
+  <div class="hero">
+    <div class="hero-head">
+      ${badge(worst, 'hero-level')}
+      <div style="min-width:0">
+        <div style="font-weight:650;overflow-wrap:anywhere" title="${runTitle(run, true)}">${runTitle(run)}</div>
+        <div class="hero-meta">${rel(run.generatedAt)} · ${nWins(run.entries?.windows?.length || 1)}</div>
+      </div>
+      <div class="spacer" style="display:flex;gap:8px">${actions(run)}</div>
+    </div>
+    <div class="tbl-wrap" style="padding:0 8px">
+      <table class="grid">${gridHead}
+        <tbody>${run.summaries.map(moduleCells).join('')}</tbody></table>
+    </div>
+    <div style="padding:12px 20px 16px;border-top:1px solid var(--line)">
+      <div class="shot-grid" id="shots-${CSS.escape(run.dir)}"></div>
+    </div>
+  </div>`;
+}
+
+function runningCard(run) {
+  return `
+  <div class="hero" style="border-color:#e5c891">
+    <div class="hero-head">
+      ${badge('RUNNING', 'hero-level')}
+      <div style="min-width:0">
+        <div role="status" aria-live="polite" style="font-weight:650;overflow-wrap:anywhere"><strong class="run-step">${run.progress?.step || 'starting…'}</strong></div>
+        <div class="hero-meta run-detail">${run.progress?.detail || ''}</div>
+        <div class="hero-meta">${run.entries.modules.map(disp).join(', ')} · ${nWins(run.entries.windows?.length || 1)} · started ${new Date(run.startedAt).toLocaleTimeString()}</div>
+      </div>
+    </div>
+    <div style="padding:0 20px 14px">
+      <div class="bar" style="margin-bottom:8px"><i></i></div>
+      <div class="step-log run-log">${(run.progress?.steps || []).map(s => `<div>[${new Date(s.at).toLocaleTimeString()}] ${s.step}${s.detail ? ' — ' + s.detail : ''}</div>`).join('')}</div>
+    </div>
+  </div>`;
+}
+
+function historyRow(run) {
+  const worst = worstLevel(run.summaries);
+  return `
+  <div class="row-item" data-run="${run.dir}">
+    <div class="row-head" data-toggle-run="${run.dir}" tabindex="0" role="button" aria-expanded="false">
+      <span class="chev">›</span>
+      ${badge(worst)}
+      <span style="font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${runTitle(run, true)}">${runTitle(run)}</span>
+      <span class="muted num spacer" style="font-size:12px">${rel(run.generatedAt)}</span>
+    </div>
+    <div class="row-body"><div class="row-body-in">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:8px">${actions(run)}</div>
+      <div class="tbl-wrap"><table class="grid">${gridHead}
+        <tbody>${run.summaries.map(moduleCells).join('')}</tbody></table></div>
+      <div class="shot-grid" style="margin-top:8px" id="shots-${CSS.escape(run.dir)}"></div>
+    </div></div>
+  </div>`;
+}
+
+let retryTimer = null;
+async function load() {
+  let r;
+  try {
+    r = await api('/api/runs');
+    if (r.status === 401) { $('#runs').innerHTML = '<div class="hero empty" style="padding:24px">Set your API token (button top-right).</div>'; pollStatus(); return; }
+    allRuns = await r.json();
+  } catch {
+    $('#pager').innerHTML = '';
+    $('#runs').innerHTML = `<div class="hero empty">
+      <div style="font-weight:650;margin-bottom:4px">Couldn't load runs</div>
+      <div class="muted" style="font-size:13px;margin-bottom:12px">The server didn't answer — it may be restarting. Retrying every 15 s.</div>
+      <button type="button" class="btn primary" id="retry">Retry now</button></div>`;
+    $('#retry').onclick = () => { fresh = true; load(); };
+    clearInterval(retryTimer); retryTimer = setInterval(load, 15000);
+    return;
+  }
+  clearInterval(retryTimer); retryTimer = null;
+  pollStatus();
+  renderList();
+}
+
+// Screenshots are immutable artifacts (same run dir = same images), so the
+// rendered grid HTML is cached per dir — SSE re-renders restore open rows
+// instantly instead of refetching.
+const shotsCache = new Map();
+
+function renderList() {
+  const openDirs = new Set($$('.row-item.open').map(el => el.dataset.run)); // survive SSE re-render
+  const h = new URLSearchParams();
+  for (const k of ['level', 'module', 'from', 'to']) if (filt[k]) h.set(k, filt[k]);
+  if (filt.page > 1) h.set('page', filt.page);
+  if (filt.size !== 10) h.set('size', filt.size);
+  history.replaceState(null, '', h.size ? '#' + h : location.pathname);
+  const runs = applyFilters();
+  const size = filt.size;
+  const pages = Math.max(1, Math.ceil(runs.length / size));
+  if (filt.page > pages) filt.page = pages;
+  const pageRuns = runs.slice((filt.page - 1) * size, filt.page * size);
+  $('#result-count').textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}${(filt.level || filt.module || filt.from || filt.to) ? ' matching' : ''}`;
+  $('#result-count').style.fontWeight = (filt.level || filt.module || filt.from || filt.to) ? '600' : '';
+
+  $('#pager').innerHTML = pages > 1 ? `
+    <li class="${filt.page === 1 ? 'off' : ''}"><a href="#" data-page="${filt.page - 1}" aria-label="previous page">‹</a></li>
+    ${pageList(filt.page, pages).map(p => p === '…'
+      ? '<li class="off"><span>…</span></li>'
+      : `<li class="${p === filt.page ? 'on' : ''}">${p === filt.page
+          ? `<span aria-current="page">${p}</span>`
+          : `<a href="#" data-page="${p}">${p}</a>`}</li>`).join('')}
+    <li class="${filt.page === pages ? 'off' : ''}"><a href="#" data-page="${filt.page + 1}" aria-label="next page">›</a></li>` : '';
+  $$('#pager a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); filt.page = +a.dataset.page; renderList(); }));
+
+  if (!runs.length) {
+    $('#runs').innerHTML = allRuns.length === 0
+      ? `<div class="hero empty">
+           <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin:0 auto 8px;display:block"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v4h4"/><path d="M9 12h6M9 16h6"/></svg>
+           <div style="font-weight:650;margin-bottom:4px">No captures yet</div>
+           <div class="muted" style="font-size:13px">Run your first comparison — pick modules and a baseline vs compare date with <strong>New capture</strong> (top right). Results and screenshots land here live.</div>
+         </div>`
+      : `<div class="hero empty" style="padding:24px"><div class="muted">No runs match the filters. <a href="#" id="clear-inline">Clear filters</a></div></div>`;
+    $('#clear-inline')?.addEventListener('click', e => { e.preventDefault(); $('#f-clear').click(); });
+    return;
+  }
+
+  const running = pageRuns.find(r => r.running);
+  const firstDone = pageRuns.find(r => !r.running);
+  const rest = pageRuns.filter(r => r !== running && r !== firstDone);
+
+  $('#runs').innerHTML =
+    (running ? runningCard(running) : '') +
+    (firstDone ? heroRun(firstDone) : '') +
+    rest.map(historyRow).join('');
+  if (fresh) { $('#runs').firstElementChild?.classList.add('fresh'); fresh = false; }
+
+  if (firstDone) loadShots(firstDone.dir);
+  // restore rows that were open before this render (SSE reloads wipe them otherwise)
+  for (const el of $$('.row-item')) if (openDirs.has(el.dataset.run)) {
+    el.classList.add('open');
+    el.querySelector('.row-head').setAttribute('aria-expanded', 'true');
+    loadShots(el.dataset.run);
+  }
+  $$('[data-toggle-run]').forEach(h => {
+    const activate = async () => {
+      const item = h.closest('.row-item');
+      const opening = !item.classList.contains('open');
+      item.classList.toggle('open', opening);
+      h.setAttribute('aria-expanded', opening);
+      if (opening) loadShots(item.dataset.run);
+    };
+    h.addEventListener('click', activate);
+    h.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
+  });
+}
+
+async function loadShots(dir) {
+  const box = $(`#shots-${CSS.escape(dir)}`);
+  if (!box || box.dataset.loaded) return;
+  box.dataset.loaded = 1;
+  if (shotsCache.has(dir)) { box.innerHTML = shotsCache.get(dir); return; } // instant restore
+  box.innerHTML = '<div class="skel" style="height:120px"></div>';
+  const full = await api(`/api/runs/${dir}`).then(r => r.json()).catch(() => null);
+  if (!full) {
+    delete box.dataset.loaded; // allow retry
+    // the same point-of-failure retry the download buttons have
+    box.innerHTML = `<div class="muted" style="font-size:13px">Couldn't load screenshots —
+      <button type="button" class="btn" style="padding:2px 8px;height:26px">Retry</button></div>`;
+    box.querySelector('button').onclick = () => loadShots(dir);
+    return;
+  }
+  box.innerHTML = (full.results || []).filter(r2 => r2.screenshot).map(r2 => {
+    const e2 = r2.entry ?? {};
+    const short = (d) => (d ?? '—').slice(5); // compact MM-DD; full ISO stays in title/alt
+    const dates = `${e2.from ?? '—'} vs ${e2.to ?? '—'} ${e2.start?.slice(0, 5) ?? ''}–${e2.end?.slice(0, 5) ?? ''}`;
+    const compact = `${short(e2.from)} → ${short(e2.to)} ${e2.start?.slice(0, 5) ?? ''}–${e2.end?.slice(0, 5) ?? ''}`;
+    const pctv = r2.percentageChange;
+    const below = typeof pctv === 'number' && pctv < 0;
+    const val = r2.hasData ? `${fmt(r2.value1)} → ${fmt(r2.value2)} (${pctv}%)` : (r2.reason || 'no data');
+    return `
+    <figure>
+      <div class="imgbox"><img loading="lazy" src="${qs('/' + r2.screenshot)}" alt="${disp(r2.module)} chart, ${dates}: ${val}"></div>
+      <figcaption class="shot-cap">
+        <div class="ctx"><span class="mod">${disp(r2.module)}</span> · ${compact}</div>
+        ${r2.hasData
+          ? `<div class="shot-vals"><span class="num">${fmt(r2.value1)}</span><span class="arrow">→</span><span class="num">${fmt(r2.value2)}</span>
+             <span class="delta-chip ${below ? 'neg' : 'pos'}" title="compare is ${Math.abs(pctv)}% ${below ? 'below' : 'above'} baseline">${pctv}%</span></div>`
+          : `<div class="shot-vals muted" style="font-style:italic">${val}</div>`}
+      </figcaption>
+    </figure>`;
+  }).join('') || '<div class="muted" style="font-size:12px">No screenshots — capture failed before the screenshot stage.</div>';
+  shotsCache.set(dir, box.innerHTML);
+}
+
+// Lightbox: click a screenshot → native dialog (Escape closes, focus is trapped).
+const lb = $('#lightbox');
+document.addEventListener('click', (e) => {
+  const img = e.target.closest('.shot-grid img');
+  if (!img) return;
+  lb.replaceChildren(Object.assign(document.createElement('img'), { src: img.src, alt: img.alt }));
+  lb.showModal();
+});
+lb.addEventListener('click', (e) => { if (e.target === lb || e.target.tagName === 'IMG') lb.close(); });
+
+// ── status pills ─────────────────────────────────────────────────────────
+async function pollStatus() {
+  let s = {};
+  try {
+    const r = await api('/api/status');
+    s = await r.json().catch(() => ({}));
+    $('#login').style.display = (!token() && r.status === 401) ? '' : 'none';
+  } catch { return false; }
+  const pill = $('#status-pill'), txt = $('#status-text');
+  if (s.running) { pill.className = 'pill busy'; txt.textContent = 'capture running'; return true; }
+  if (s.finishedAt) { pill.className = 'pill ' + (s.ok ? 'live' : 'busy'); pill.querySelector('.dot').style.background = s.ok ? 'var(--sev-ok)' : 'var(--sev-1)'; txt.textContent = (s.ok ? 'last run OK · ' : 'last run FAILED · ') + relText(s.finishedAt); }
+  else { pill.className = 'pill'; txt.textContent = 'idle'; }
+  return s.running;
+}
+$('#login').onclick = () => askToken().then(t => { if (t) { localStorage.setItem('token', t); load(); } });
+
+// ── seamless updates: SSE ────────────────────────────────────────────────
+function startEvents() {
+  const es = new EventSource(qs('/api/events'));
+  es.onopen = () => { $('#sse-pill').className = 'pill live'; $('#sse-text').textContent = 'live'; };
+  es.onerror = () => {
+    $('#sse-pill').className = 'pill'; $('#sse-text').textContent = 'reconnecting';
+    // If SSE died mid-run, don't leave the form bricked — fall back to a status check.
+    pollStatus().then(running => { if (!running) $('#run').disabled = false; });
+  };
+  es.addEventListener('run-started', (e) => {
+    const { args } = JSON.parse(e.data);
+    fresh = true;
+    load();
+    $('#run').disabled = true;
+    const pill = $('#status-pill'), txt = $('#status-text');
+    pill.className = 'pill busy'; txt.textContent = 'capture running';
+    if ($('#request-form').classList.contains('open')) $('#form-toggle').click();
+    setMsg(`Running ${args.moduleList.map(disp).join(', ')}…`);
+  });
+  es.addEventListener('progress', (e) => {
+    const p = JSON.parse(e.data);
+    const card = document.querySelector('.run-step');
+    if (card) {
+      card.textContent = p.step;
+      document.querySelector('.run-detail').textContent = p.detail || '';
+      const log = document.querySelector('.run-log');
+      if (log) {
+        log.insertAdjacentHTML('beforeend', `<div>[${new Date(p.at).toLocaleTimeString()}] ${p.step}${p.detail ? ' — ' + p.detail : ''}</div>`);
+        log.scrollTop = log.scrollHeight;
+      }
+    } else { load(); }
+  });
+  es.addEventListener('run-finished', (e) => {
+    const d = JSON.parse(e.data);
+    $('#run').disabled = false;
+    setMsg('');
+    const verdict = `Capture finished: ${d.ok ? 'OK' : 'FAILED'}`;
+    $('#sr-status').textContent = verdict; // announced to screen readers
+    if (document.hidden) document.title = `${d.ok ? '✓ capture OK' : '⚠ capture FAILED'} · ${baseTitle}`;
+    const pill = $('#status-pill'), txt = $('#status-text');
+    pill.className = 'pill ' + (d.ok ? 'live' : 'busy');
+    pill.querySelector('.dot').style.background = d.ok ? 'var(--sev-ok)' : 'var(--sev-1)';
+    txt.textContent = (d.ok ? 'last run OK · ' : 'last run FAILED · ') + relText(new Date().toISOString());
+    fresh = true; // the verdict handoff — hero arrives, badge stamps in
+    load();
+  });
+}
+
+// ── modules: chips + filter options follow src/config.js via /api/modules ──
+// Offline fallback keeps the page usable; config stays the single source of truth.
+const FALLBACK_MODULES = ['trade_trends', 'cashout', 'va_topup', 'x2x', 'hold_login', 'user_register', 'dana_cicil'];
+let modCount = FALLBACK_MODULES.length;
+async function loadModules() {
+  const mods = await api('/api/modules').then(r => r.ok ? r.json() : null).catch(() => null)
+    || FALLBACK_MODULES.map((name) => ({ name, retentionDays: name === 'va_topup' ? 3 : null }));
+  modCount = mods.length;
+  $('#mod-chips').innerHTML = mods.map(m => `
+    <label class="chip"><input type="checkbox" name="mod" value="${m.name}" checked>${disp(m.name)}${m.retentionDays ? ` <span class="muted" style="font-size:11px">~${m.retentionDays}d</span>` : ''}</label>`).join('');
+  $('#f-module').insertAdjacentHTML('beforeend', mods.map(m => `<option value="${m.name}">${disp(m.name)}</option>`).join(''));
+  $('#f-module').value = filt.module; // re-apply hash-restored filter now that options exist
+}
+
+bindFilters();
+loadModules();
+load();
+startEvents();
+</script>
+</body>
+</html>

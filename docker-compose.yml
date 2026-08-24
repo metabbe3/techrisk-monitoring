@@ -1,0 +1,49 @@
+services:
+  # One-shot: docker compose run --rm capture --modules all
+  capture:
+    build: .
+    shm_size: 2gb
+    init: true # reap chromium if the run is killed mid-capture
+    env_file: .env
+    environment:
+      # Inside the docker network the dashboard's MySQL is `db:3306`
+      # (overrides .env host settings — process env wins over dotenv).
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+    volumes:
+      - ./sessions:/app/sessions
+      - ./output:/app/output
+    networks: [capture, dashboard]
+
+  # Always-on viewer + API + "run now" trigger:
+  # bash install.sh  →  http://server:8080
+  # (host port via WEB_PORT; auto-restarts and survives instance reboots)
+  web:
+    build: .
+    entrypoint: ["node", "src/server.js"]
+    shm_size: 2gb
+    init: true # reap chromium/zombies — no ghost browsers after a kill
+    restart: unless-stopped # auto-start after instance/docker restart
+    env_file: .env
+    environment:
+      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    volumes:
+      - ./sessions:/app/sessions
+      - ./output:/app/output
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/modules >/dev/null 2>&1 || curl -fs http://localhost:8080/api/modules >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks: [capture, dashboard]
+
+networks:
+  capture:
+    name: techrisk-capture
+  dashboard:
+    name: techrisk-dashboard_techrisk-network
+    external: true

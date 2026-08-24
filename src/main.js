@@ -1,0 +1,198 @@
+import 'dotenv/config';
+import fs from 'node:fs';
+import path from 'node:path';
+import { MODULES, ENV, parseArgs, DATA_DIR } from './config.js';
+import { BrowserSession } from './browser.js';
+import { AuthService } from './auth.js';
+import { Dashboard } from './dashboard.js';
+import { ComparisonCapture } from './capture.js';
+import { IncidentReport } from './report.js';
+import { MysqlSink } from './mysql-sink.js';
+
+const HARD_TIMEOUT_MS = 30 * 60 * 1000; // site is slow; never run away
+
+// Orchestrates one full capture run. Exported so the web server can trigger it.
+// onProgress(step, detail) is called at each step so the web UI can show
+// live progress for the running capture.
+export async function runCapture(args, { onProgress = () => {} } = {}) {
+  if (!ENV.email || !ENV.password) throw new Error('LOGIN_EMAIL / LOGIN_PASSWORD missing in .env');
+
+  const started = Date.now();
+  const progress = (step, detail = '') => {
+    const msg = detail ? `${step} — ${detail}` : step;
+    console.log(msg);
+    onProgress({ at: new Date().toISOString(), step, detail, modules: args.moduleList });
+  };
+
+  const session = new BrowserSession({ headless: ENV.headless });
+  await session.start();
+
+  try {
+    progress('login', 'checking saved session');
+    const auth = new AuthService(session.page);
+    await auth.ensureLoggedIn(ENV.email, ENV.password, ENV.loginUrl);
+
+    const dashboard = new Dashboard(session.page);
+    progress('dashboard', 'opening DANA overall dashboard');
+    await dashboard.prepare();
+    await session.saveSession();
+
+    const report = new IncidentReport(args.task);
+    const capturer = new ComparisonCapture(session.page);
+
+    let currentBoard = 'DANA_Overall_Dashboard'; // prepare() opened this
+    for (const key of args.moduleList) {
+      if (Date.now() - started > HARD_TIMEOUT_MS) throw new Error('capture exceeded 30 min, aborting');
+
+      const cfg = { key, ...MODULES[key] };
+      // Modules can live on different dashboards (dana_cicil → Command Center).
+      // reset() is a plain reload, so it stays on the current board — switch
+      // boards only when the next module needs a different one.
+      const board = cfg.dashboard || 'DANA_Overall_Dashboard';
+      if (board !== currentBoard) {
+        progress('dashboard', `opening ${board}`);
+        await dashboard.openDisplayBoard(board); // route-based; works in both directions
+        await dashboard.escapeModals(); // the new board can land with its own modal
+        currentBoard = board;
+      }
+      // Dev escape hatch: MODULE_CHART_OVERRIDE=bogus simulates a dead chart
+      // (testing the CAPTURE FAILED path without waiting for a real outage).
+      if (process.env.MODULE_CHART_OVERRIDE) cfg.dashboardItem = process.env.MODULE_CHART_OVERRIDE;
+      const i = args.moduleList.indexOf(key) + 1;
+
+      // Retention warning: some charts only keep a few days of queryable data
+      // (va_topup ≈ 3 days) — baselines older than that return "no data".
+      const retention = MODULES[key].retentionDays;
+      const oldest = args.windowList.map((w) => w.from).sort()[0];
+      const stale = retention && new Date(oldest) < new Date(Date.now() - retention * 86400000);
+      if (stale) {
+        console.log(
+          `  [${key}] WARNING: baseline ${oldest} is older than this chart's ~${retention}-day data retention — expect "no data"`
+        );
+      }
+
+      const captures = [];
+      let lastError = null;
+
+      for (let wi = 0; wi < args.windowList.length; wi++) {
+        const entry = args.windowList[wi];
+        progress(
+          `module ${i}/${args.moduleList.length}`,
+          `${cfg.dashboardItem} · window ${wi + 1}/${args.windowList.length} (${entry.from} vs ${entry.to} ${entry.start}–${entry.end})`
+        );
+
+        // Site queries 500 randomly and heavy full-day compares come back
+        // "no data" (audit 2026-08-19) — retry the whole module until it has
+        // data or attempts run out; keep the last (no-data) result for the report.
+        let captured = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            progress(`module ${i}/${args.moduleList.length}`, `${cfg.dashboardItem} · window ${wi + 1} (attempt ${attempt})`);
+            await dashboard.openChart(cfg.dashboardItem, { expectTabs: true });
+            await dashboard.clickTab('Comparison View');
+            captured = await capturer.capture(cfg, entry, `${wi}_${attempt - 1}`, report.dir);
+            if (captured.hasData) break;
+            lastError = captured.reason;
+            progress(`module ${i}/${args.moduleList.length}`, `${cfg.dashboardItem}: ${captured.reason}, retrying`);
+          } catch (e) {
+            lastError = e.message;
+            captured = null;
+            console.log(`  [${key}] attempt ${attempt} failed: ${e.message}`);
+          }
+          if (attempt < 3) await dashboard.reset();
+        }
+
+        if (captured && captured.hasData) captures.push(captured);
+        else {
+          console.log(`  [${key}] window ${wi + 1} giving up after retries — recording failure`);
+          captures.push(
+            captured || {
+              entry,
+              value1: 0,
+              value2: 0,
+              percentageChange: 0,
+              tableRows: [],
+              screenshot: null,
+              hasData: false,
+              reason: lastError || 'capture failed',
+            }
+          );
+        }
+      }
+
+      report.addModule(cfg, args.windowList[0], captures);
+      if (key !== args.moduleList[args.moduleList.length - 1]) await dashboard.reset();
+    }
+
+    const out = report.write();
+    pruneRuns();
+    progress('saving', 'writing report / MySQL / webhook');
+    const sink = new MysqlSink();
+    await sink.flushPending();
+    await sink.save(out.meta); // best-effort — queued on failure, never throws
+    await sink.close();
+    await notifyWebhook(out.meta);
+    progress('done', out.dir);
+    return out;
+  } finally {
+    await session.close();
+  }
+}
+
+// Keep the newest RETENTION_RUNS run dirs (default 50); 0 disables.
+// Runs hold ~600KB each — without this, a daily cron grows forever.
+export function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10)) {
+  if (!keep || !fs.existsSync(DATA_DIR)) return;
+  const dirs = fs
+    .readdirSync(DATA_DIR)
+    .filter((d) => /^\w+_\d{4}-\d{2}-\d{2}T/.test(d))
+    .sort();
+  for (const d of dirs.slice(0, Math.max(0, dirs.length - keep))) {
+    fs.rmSync(path.join(DATA_DIR, d), { recursive: true, force: true });
+    console.log(`pruned old run: ${d}`);
+  }
+}
+
+// POST P1/P2 incidents and capture failures to WEBHOOK_URL (Slack-compatible
+// JSON payload). Silent no-op when unset.
+export async function notifyWebhook(meta) {
+  const url = process.env.WEBHOOK_URL;
+  if (!url) return;
+  const findings = meta.summaries.filter(
+    (s) => ['P1', 'P2', 'CAPTURE FAILED'].includes(s.incidentLevel)
+  );
+  if (!findings.length) return;
+  const text = `[techrisk-capture] ${meta.task} @ ${meta.generatedAt}\n` +
+    findings
+      .map((s) => `• ${s.module}: ${s.incidentLevel} ${s.averagePercentage ?? ''}${s.reason ? ' — ' + s.reason : ''}`)
+      .join('\n');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, findings }),
+    });
+    console.log(`webhook notified: ${res.status}`);
+  } catch (e) {
+    console.log(`webhook failed: ${e.message}`);
+  }
+}
+
+// CLI entry
+const isCli = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
+if (isCli) {
+  const args = parseArgs(process.argv.slice(2));
+  console.log(`Capture: modules=${args.moduleList.join(',')} ${args.from} vs ${args.to} ${args.start}-${args.end}`);
+  runCapture(args)
+    .then((out) => {
+      console.log(`\nDone. Output in ${out.dir}`);
+      // cron signal: report exists but nothing was captured
+      if (out.meta.summaries.length > 0 && out.meta.summaries.every((s) => s.incidentLevel === 'CAPTURE FAILED')) {
+        process.exitCode = 1;
+      }
+    })
+    .catch((e) => {
+      console.error(`FAILED: ${e.message}`);
+      process.exit(1);
+    });
+}
