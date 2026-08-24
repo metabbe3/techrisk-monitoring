@@ -11,6 +11,16 @@ import { MysqlSink } from './mysql-sink.js';
 
 const HARD_TIMEOUT_MS = 30 * 60 * 1000; // site is slow; never run away
 
+// Cooperative stop: the UI's Stop button sets this; runCapture checks it at
+// every loop boundary and unwinds cleanly (browser closed in the finally).
+let abortRequested = false;
+export function requestAbort() {
+  abortRequested = true;
+}
+const checkAbort = () => {
+  if (abortRequested) throw new Error('capture stopped by user');
+};
+
 // Orchestrates one full capture run. Exported so the web server can trigger it.
 // onProgress(step, detail) is called at each step so the web UI can show
 // live progress for the running capture.
@@ -41,7 +51,11 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
     const capturer = new ComparisonCapture(session.page);
 
     let currentBoard = 'DANA_Overall_Dashboard'; // prepare() opened this
+    abortRequested = false;
+    let stopped = false;
+    try {
     for (const key of args.moduleList) {
+      checkAbort();
       if (Date.now() - started > HARD_TIMEOUT_MS) throw new Error('capture exceeded 30 min, aborting');
 
       const cfg = { key, ...MODULES[key] };
@@ -86,11 +100,15 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
         // data or attempts run out; keep the last (no-data) result for the report.
         let captured = null;
         for (let attempt = 1; attempt <= 3; attempt++) {
+          checkAbort();
           try {
             progress(`module ${i}/${args.moduleList.length}`, `${cfg.dashboardItem} · window ${wi + 1} (attempt ${attempt})`);
             await dashboard.openChart(cfg.dashboardItem, { expectTabs: true });
+            checkAbort();
             await dashboard.clickTab('Comparison View');
+            checkAbort();
             captured = await capturer.capture(cfg, entry, `${wi}_${attempt - 1}`, report.dir);
+            checkAbort();
             if (captured.hasData) break;
             lastError = captured.reason;
             progress(`module ${i}/${args.moduleList.length}`, `${cfg.dashboardItem}: ${captured.reason}, retrying`);
@@ -123,6 +141,12 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
       report.addModule(cfg, args.windowList[0], captures);
       if (key !== args.moduleList[args.moduleList.length - 1]) await dashboard.reset();
     }
+    } catch (e) {
+      // A user stop still writes what completed — the partial run is evidence.
+      if (e.message !== 'capture stopped by user') throw e;
+      stopped = true;
+      console.log('  [stop] requested — writing partial report');
+    }
 
     const out = report.write();
     pruneRuns();
@@ -132,8 +156,8 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
     await sink.save(out.meta); // best-effort — queued on failure, never throws
     await sink.close();
     await notifyWebhook(out.meta);
-    progress('done', out.dir);
-    return out;
+    progress(stopped ? 'stopped' : 'done', out.dir);
+    return { ...out, stopped };
   } finally {
     await session.close();
   }

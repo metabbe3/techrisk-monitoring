@@ -2,7 +2,7 @@ import 'dotenv/config';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { runCapture } from './main.js';
+import { runCapture, requestAbort } from './main.js';
 import { parseArgs, DATA_DIR, MODULES } from './config.js';
 import { MysqlSink } from './mysql-sink.js';
 
@@ -124,7 +124,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (route === 'GET /api/runs') return json(res, 200, listRuns());
 
-    if (url.pathname.startsWith('/api/runs/')) {
+    if (req.method === 'GET' && url.pathname.startsWith('/api/runs/')) {
       return serveFile(res, OUTPUT_ROOT, url.pathname.replace('/api/runs', '') + '/incidents.json');
     }
 
@@ -144,8 +144,8 @@ const server = http.createServer(async (req, res) => {
         },
       })
         .then((out) => {
-          lastRun = { finishedAt: new Date().toISOString(), ok: true, dir: out.dir };
-          broadcast('run-finished', { ok: true, dir: out.dir });
+          lastRun = { finishedAt: new Date().toISOString(), ok: !out.stopped, dir: out.dir };
+          broadcast('run-finished', { ok: !out.stopped, stopped: !!out.stopped, dir: out.dir });
         })
         .catch((e) => {
           lastRun = { finishedAt: new Date().toISOString(), ok: false, error: e.message };
@@ -156,6 +156,29 @@ const server = http.createServer(async (req, res) => {
           currentRun = null;
         });
       return;
+    }
+
+    // Stop the in-flight capture — it unwinds at the next loop boundary
+    // (between modules/window attempts); completed modules stay on disk.
+    if (route === 'POST /api/capture/stop') {
+      if (!running) return json(res, 409, { error: 'no capture running' });
+      console.log('[api] stop requested — finishing current step');
+      requestAbort();
+      return json(res, 202, { stopping: true });
+    }
+
+    // Delete a stored run (screenshots + CSV + JSON). Refused mid-capture: the
+    // running capture writes into its own new dir, but a stop-then-delete in
+    // one breath is the honest order.
+    if (route.startsWith('DELETE /api/runs/')) {
+      if (running) return json(res, 409, { error: 'a capture is running — stop it first' });
+      const dir = decodeURIComponent(url.pathname.replace('/api/runs/', ''));
+      if (!/^[A-Za-z0-9_.-]+$/.test(dir)) return json(res, 400, { error: 'invalid run dir' });
+      const target = path.join(OUTPUT_ROOT, dir);
+      if (!fs.existsSync(target)) return json(res, 404, { error: 'run not found' });
+      fs.rmSync(target, { recursive: true, force: true });
+      console.log(`[api] deleted run ${dir}`);
+      return json(res, 200, { deleted: dir });
     }
 
     if (route === 'GET /api/modules') {

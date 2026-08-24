@@ -614,7 +614,41 @@ document.addEventListener('click', (e) => {
   if (d) return dl(d);
   const rr = e.target.closest('[data-rerun]');
   if (rr) { const run = allRuns.find(r2 => r2.dir === rr.dataset.rerun); if (run) rerun(run); }
+  const st = e.target.closest('[data-stop]');
+  if (st) return stopCapture(st);
+  const del = e.target.closest('[data-del-run]');
+  if (del) return delRun(del);
 });
+
+// Stop: the capture unwinds at the next module/window boundary — completed
+// modules stay on disk as a partial run.
+async function stopCapture(btn) {
+  btn.disabled = true;
+  const step = document.querySelector('.run-step');
+  if (step) step.textContent = 'stopping — finishing current step…';
+  const r = await api('/api/capture/stop', { method: 'POST' }).catch(() => null);
+  if (!r || !r.ok) { btn.disabled = false; if (step) step.textContent = 'stop failed — try again'; }
+}
+
+// Delete: two-click guard — first click arms ("Sure?" in red, 3s), second fires.
+function delRun(btn) {
+  if (btn.dataset.armed) {
+    clearTimeout(+btn.dataset.armed);
+    api('/api/runs/' + btn.dataset.delRun, { method: 'DELETE' }).then(r => {
+      if (r.ok) load();
+      else { btn.textContent = 'delete failed — retry?'; delete btn.dataset.armed; }
+    });
+    return;
+  }
+  btn.dataset.orig = btn.textContent;
+  btn.textContent = 'Sure?';
+  btn.style.borderColor = 'var(--sev-1)';
+  btn.dataset.armed = setTimeout(() => {
+    btn.textContent = btn.dataset.orig;
+    btn.style.borderColor = '';
+    delete btn.dataset.armed;
+  }, 3000);
+}
 
 // ── rendering ────────────────────────────────────────────────────────────
 function moduleCells(s) {
@@ -630,7 +664,8 @@ const gridHead = `<thead><tr><th scope="col">Module</th><th scope="col">Level</t
 const actions = (run) => `
         <button type="button" class="btn" data-dl="/output/${run.dir}/report.csv" data-name="report.csv">report.csv ↓</button>
         <button type="button" class="btn" data-dl="/api/runs/${run.dir}" data-name="${run.dir}.json">JSON ↓</button>
-        <button type="button" class="btn" data-rerun="${run.dir}" title="Run this exact configuration again">Re-run</button>`;
+        <button type="button" class="btn" data-rerun="${run.dir}" title="Run this exact configuration again">Re-run</button>
+        <button type="button" class="btn" data-del-run="${run.dir}" title="Delete this run and its screenshots" style="color:var(--sev-1)">Delete</button>`;
 
 function heroRun(run) {
   const worst = worstLevel(run.summaries);
@@ -664,6 +699,7 @@ function runningCard(run) {
         <div class="hero-meta run-detail">${run.progress?.detail || ''}</div>
         <div class="hero-meta">${run.entries.modules.map(disp).join(', ')} · ${nWins(run.entries.windows?.length || 1)} · started ${new Date(run.startedAt).toLocaleTimeString()}</div>
       </div>
+      <div class="spacer" style="display:flex;gap:8px"><button type="button" class="btn" data-stop style="color:var(--sev-1)">Stop</button></div>
     </div>
     <div style="padding:0 20px 14px">
       <div class="bar" style="margin-bottom:8px"><i></i></div>
@@ -884,14 +920,14 @@ function startEvents() {
   es.addEventListener('run-finished', (e) => {
     const d = JSON.parse(e.data);
     $('#run').disabled = false;
-    setMsg('');
-    const verdict = `Capture finished: ${d.ok ? 'OK' : 'FAILED'}`;
+    setMsg(d.stopped ? 'Capture stopped — completed modules were saved.' : '');
+    const verdict = d.stopped ? 'Capture stopped (partial results saved)' : `Capture finished: ${d.ok ? 'OK' : 'FAILED'}`;
     $('#sr-status').textContent = verdict; // announced to screen readers
-    if (document.hidden) document.title = `${d.ok ? '✓ capture OK' : '⚠ capture FAILED'} · ${baseTitle}`;
+    if (document.hidden) document.title = `${d.stopped ? '⏹ capture stopped' : d.ok ? '✓ capture OK' : '⚠ capture FAILED'} · ${baseTitle}`;
     const pill = $('#status-pill'), txt = $('#status-text');
     pill.className = 'pill ' + (d.ok ? 'live' : 'busy');
     pill.querySelector('.dot').style.background = d.ok ? 'var(--sev-ok)' : 'var(--sev-1)';
-    txt.textContent = (d.ok ? 'last run OK · ' : 'last run FAILED · ') + relText(new Date().toISOString());
+    txt.textContent = (d.stopped ? 'last run stopped · ' : d.ok ? 'last run OK · ' : 'last run FAILED · ') + relText(new Date().toISOString());
     fresh = true; // the verdict handoff — hero arrives, badge stamps in
     load();
   });
