@@ -50,7 +50,10 @@ if [ ! -f .env ]; then
   cp .env.example .env
   say "Created .env from .env.example"
 fi
-if ! grep -Eq '^LOGIN_EMAIL=..' .env || ! grep -Eq '^LOGIN_PASSWORD=..' .env; then
+EMAIL=$(sed -n 's/^LOGIN_EMAIL=//p' .env)
+PASS=$(sed -n 's/^LOGIN_PASSWORD=//p' .env)
+is_placeholder() { case "$1" in ""|your.email@dana.id|secret|changeme|placeholder*) return 0;; *) return 1;; esac; }
+if is_placeholder "$EMAIL" || is_placeholder "$PASS"; then
   [ -t 0 ] || die "LOGIN_EMAIL/LOGIN_PASSWORD missing in .env and no terminal to ask — edit .env and re-run"
   say "Monitor credentials needed (stored in .env only — this repo is public, secrets are never pushed)"
   read -r -p "  Login email: " LOGIN_EMAIL
