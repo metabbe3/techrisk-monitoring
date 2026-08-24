@@ -14,7 +14,7 @@ export class ComparisonCapture {
     const page = this.page;
     console.log(`[${moduleCfg.key}] ${entry.from} vs ${entry.to} ${entry.start}-${entry.end}`);
 
-    await retry(() => this.#fillForm(entry), 2, 3000, 'fill comparison form');
+    await retry(() => this.#fillForm(entry), 3, 2000, 'fill comparison form');
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
     const found = await this.#hoverChartLink();
@@ -38,6 +38,8 @@ export class ComparisonCapture {
       .filter(Boolean))].sort();
     const expected = [entry.from, entry.to].sort();
     if (queried.length && JSON.stringify(queried) !== JSON.stringify(expected)) {
+      // keep what the form actually held when this raced — the fix starts here
+      await this.#screenshot(`${moduleCfg.key}_datemismatch_${index}`, outputDir);
       await this.#closePopup();
       throw new Error(`date mismatch: popup queried ${queried.join('+')} but window was ${entry.from}→${entry.to}`);
     }
@@ -78,8 +80,9 @@ export class ComparisonCapture {
     await this.#setField(COMPARE.endTime, normalizeTime(entry.end));
     // Let Angular's digest and the site's on-blur formatters commit before
     // firing the query — clicking sooner sends the previous model state
-    // (audit 2026-08-20: requested 08-18, site queried 08-19).
-    await sleep(800);
+    // (audit 2026-08-20: requested 08-18, site queried 08-19). Under server
+    // load the digest can outrun 800ms — 1500ms cut the mismatch retries.
+    await sleep(1500);
     // Readback: only proceed when the form shows the dates we asked for.
     // Soft check (unknown formats fail open) — the popup-date gate in
     // capture() is the hard enforcement.
@@ -118,6 +121,7 @@ export class ComparisonCapture {
       if (!input) return;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event('keyup', { bubbles: true })); // some digests bind here
       input.blur();
     }, selector);
     await sleep(300);
