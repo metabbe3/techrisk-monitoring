@@ -178,8 +178,14 @@ export function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10
 }
 
 // POST P1/P2 incidents and capture failures to WEBHOOK_URL (Slack-compatible
-// JSON payload). Silent no-op when unset.
+// JSON payload) and DINGTALK_WEBHOOK (DingTalk robot, markdown card with the
+// findings as an inline CSV block — the robot API can't upload files).
+// Silent no-op when unset.
 export async function notifyWebhook(meta) {
+  await Promise.all([notifySlackWebhook(meta), notifyDingtalk(meta)]);
+}
+
+async function notifySlackWebhook(meta) {
   const url = process.env.WEBHOOK_URL;
   if (!url) return;
   const findings = meta.summaries.filter(
@@ -201,6 +207,40 @@ export async function notifyWebhook(meta) {
     console.log(`webhook failed: ${e.message}`);
   }
 }
+
+// DingTalk custom robot: markdown card, keyword-filter compliant ("TR"),
+// findings rendered as an inline CSV block (robots cannot upload files).
+async function notifyDingtalk(meta) {
+  const url = process.env.DINGTALK_WEBHOOK;
+  if (!url) return;
+  const findings = meta.summaries.filter(
+    (s) => ['P1', 'P2', 'CAPTURE FAILED'].includes(s.incidentLevel)
+  );
+  if (!findings.length) return;
+  const csv = ['Module,Level,AvgChange,Duration,Data',
+    ...findings.map((s) =>
+      `${s.module},${s.incidentLevel},${s.averagePercentage ?? ''}%,${s.durationMinutes ?? ''}min,${s.entriesWithData ?? ''}/${s.entriesWithDate ?? ''}`)]
+    .join('\n');
+  const worst = findings.reduce((w, s) => (LEVEL_ORDER[s.incidentLevel] > LEVEL_ORDER[w] ? s.incidentLevel : w), 'P2');
+  const title = `TR alert ${worst}`;
+  const text = `### TR alert: ${worst}\n\n` +
+    `${new Date(meta.generatedAt).toLocaleString('en-SG', { timeZone: 'Asia/Jakarta' })} · ${findings.length} finding(s)\n\n` +
+    '```\n' + csv + '\n```\n\n' +
+    `Full report + screenshots: ${process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL + '/' + meta.dir : 'server output/' + meta.dir}`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msgtype: 'markdown', markdown: { title, text } }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (body.errcode) console.log(`dingtalk rejected: ${body.errcode} ${body.errmsg}`);
+    else console.log('dingtalk notified');
+  } catch (e) {
+    console.log(`dingtalk failed: ${e.message}`);
+  }
+}
+const LEVEL_ORDER = { P1: 4, 'CAPTURE FAILED': 3, P2: 2 };
 
 // CLI entry
 const isCli = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href;
