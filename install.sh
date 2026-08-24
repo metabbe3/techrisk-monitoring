@@ -21,7 +21,13 @@ Docker is not installed. Install it first:
 HINT
   die "Docker not found"
 fi
-docker info >/dev/null 2>&1 || die "Docker daemon not reachable — start it: sudo systemctl start docker"
+if ! docker info >/dev/null 2>&1; then
+  say "Docker daemon not running — starting it…"
+  SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+  $SUDO systemctl enable --now docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
+  sleep 2
+  docker info >/dev/null 2>&1 || die "Docker daemon still not reachable — start it manually: systemctl enable --now docker"
+fi
 
 if ! docker compose version >/dev/null 2>&1; then
   say "Docker Compose v2 missing — installing the compose plugin…"
@@ -57,18 +63,41 @@ docker network inspect "$DASH_NET" >/dev/null 2>&1 || {
 say "Building image…"
 docker compose build --pull
 
-# Port preflight — fail with the culprit named, not a daemon error at start.
+# Port preflight — retire the previous techrisk tool if it owns the port,
+# otherwise fail with the culprit named instead of a daemon error.
 if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} "; then
-  say "Port ${WEB_PORT} is already in use:"
-  (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep ":${WEB_PORT} " || true
-  docker ps --format '  {{.Names}}  {{.Ports}}' | grep "${WEB_PORT}->" || true
-  cat <<HINT
-If that is the previous techrisk deployment, stop it first:
-  docker rm -f <that container name>
-Otherwise pick another port and re-run:
+  HOLDER_PID=$( (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep ":${WEB_PORT} " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+  HOLDER_NAME=$(ps -p "${HOLDER_PID:-0}" -o comm= 2>/dev/null || true)
+  say "Port ${WEB_PORT} is held by: ${HOLDER_NAME:-unknown} (pid ${HOLDER_PID:-?})"
+  if echo "$HOLDER_NAME" | grep -qE 'go-monitoring|techrisk'; then
+    # the previous generation of this tool — stop its service (so it stays
+    # dead across reboots) or the bare process, then take the port
+    UNIT=$(systemctl status "$HOLDER_PID" 2>/dev/null | head -1 | awk '{print $2}')
+    if [ -n "${UNIT:-}" ] && [ "$UNIT" != "-" ]; then
+      say "Disabling old unit: $UNIT"
+      SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+      $SUDO systemctl disable --now "$UNIT" || true
+    else
+      kill "$HOLDER_PID" 2>/dev/null || true
+    fi
+    for i in $(seq 1 10); do
+      (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " || break
+      kill -9 "$HOLDER_PID" 2>/dev/null || true
+      sleep 1
+    done
+    (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " \
+      && die "could not free port ${WEB_PORT} — stop ${HOLDER_NAME} manually and re-run"
+    say "Old tool stopped — port ${WEB_PORT} is free"
+  else
+    (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep ":${WEB_PORT} " || true
+    docker ps --format '  {{.Names}}  {{.Ports}}' | grep "${WEB_PORT}->" || true
+    cat <<HINT
+Not the old techrisk tool — I won't kill it blindly.
+If it is disposable, stop it yourself, or pick another port:
   WEB_PORT=8081 bash install.sh
 HINT
-  die "port ${WEB_PORT} occupied"
+    die "port ${WEB_PORT} occupied"
+  fi
 fi
 
 say "Starting web service…"
