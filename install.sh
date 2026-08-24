@@ -45,13 +45,24 @@ if ! docker compose version >/dev/null 2>&1; then
     || die "compose plugin installed but not picked up — restart your shell or check 'docker compose version'"
 fi
 
-# ── 2. Credentials ──────────────────────────────────────────────────────────
+# ── 2. Credentials (asked once, written into .env — never committed) ────────
 if [ ! -f .env ]; then
   cp .env.example .env
   say "Created .env from .env.example"
 fi
-grep -Eq '^LOGIN_EMAIL=..' .env || die "Set LOGIN_EMAIL and LOGIN_PASSWORD in .env, then re-run: nano .env"
-grep -Eq '^LOGIN_PASSWORD=..' .env || die "Set LOGIN_PASSWORD in .env, then re-run"
+if ! grep -Eq '^LOGIN_EMAIL=..' .env || ! grep -Eq '^LOGIN_PASSWORD=..' .env; then
+  [ -t 0 ] || die "LOGIN_EMAIL/LOGIN_PASSWORD missing in .env and no terminal to ask — edit .env and re-run"
+  say "Monitor credentials needed (stored in .env only — this repo is public, secrets are never pushed)"
+  read -r -p "  Login email: " LOGIN_EMAIL
+  read -r -s -p "  Login password: " LOGIN_PASSWORD; echo
+  set_env() { # key value → replace or append in .env
+    awk -v k="$1" -v v="$2" 'BEGIN{FS=OFS="="} index($1,k)==1{$0=k"="v} {print}' .env > .env.tmp && mv .env.tmp .env
+    grep -q "^$1=" .env || printf '%s=%s\n' "$1" "$2" >> .env
+  }
+  set_env LOGIN_EMAIL "$LOGIN_EMAIL"
+  set_env LOGIN_PASSWORD "$LOGIN_PASSWORD"
+  say "Credentials saved to .env"
+fi
 
 # ── 3. External dashboard network (compose expects it to exist) ─────────────
 docker network inspect "$DASH_NET" >/dev/null 2>&1 || {
