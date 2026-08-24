@@ -634,9 +634,13 @@ async function stopCapture(btn) {
 function delRun(btn) {
   if (btn.dataset.armed) {
     clearTimeout(+btn.dataset.armed);
-    api('/api/runs/' + btn.dataset.delRun, { method: 'DELETE' }).then(r => {
-      if (r.ok) load();
+    api('/api/runs/' + btn.dataset.delRun, { method: 'DELETE' }).then(async r => {
+      if (r.ok) return load();
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 409) { btn.textContent = 'stop the capture first'; setTimeout(load, 2500); }
+      else if (r.status === 404) { btn.textContent = 'already deleted'; setTimeout(load, 1500); }
       else { btn.textContent = 'delete failed — retry?'; delete btn.dataset.armed; }
+      if (r.status === 409 || r.status === 404) { btn.style.borderColor = ''; }
     });
     return;
   }
