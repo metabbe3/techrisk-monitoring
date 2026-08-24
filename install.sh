@@ -22,7 +22,22 @@ HINT
   die "Docker not found"
 fi
 docker info >/dev/null 2>&1 || die "Docker daemon not reachable — start it: sudo systemctl start docker"
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 missing — update Docker or install the compose plugin"
+
+if ! docker compose version >/dev/null 2>&1; then
+  say "Docker Compose v2 missing — installing the compose plugin…"
+  ARCH=$(uname -m); case "$ARCH" in x86_64) ;; aarch64|arm64) ARCH=aarch64;; *) die "unsupported arch: $ARCH";; esac
+  SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo"
+  PLUG_DIR=/usr/local/lib/docker/cli-plugins
+  [ -d /usr/libexec/docker/cli-plugins ] && PLUG_DIR=/usr/libexec/docker/cli-plugins # RHEL/CentOS
+  if command -v curl >/dev/null; then DL=(curl -fsSL -o); else DL=(wget -qO); fi
+  $SUDO mkdir -p "$PLUG_DIR" || die "cannot create $PLUG_DIR (need root?)"
+  "${DL[@]}" "$PLUG_DIR/docker-compose" \
+    "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${ARCH}" \
+    || die "could not download the compose plugin — install manually: https://docs.docker.com/compose/install/linux/"
+  $SUDO chmod +x "$PLUG_DIR/docker-compose"
+  docker compose version >/dev/null 2>&1 \
+    || die "compose plugin installed but not picked up — restart your shell or check 'docker compose version'"
+fi
 
 # ── 2. Credentials ──────────────────────────────────────────────────────────
 if [ ! -f .env ]; then
