@@ -83,7 +83,21 @@ if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} "; 
   HOLDER_PID=$( (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep ":${WEB_PORT} " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
   HOLDER_NAME=$(ps -p "${HOLDER_PID:-0}" -o comm= 2>/dev/null || true)
   say "Port ${WEB_PORT} is held by: ${HOLDER_NAME:-unknown} (pid ${HOLDER_PID:-?})"
-  if echo "$HOLDER_NAME" | grep -qE 'go-monitoring|techrisk'; then
+  # A docker-proxy holder means a container publishes the port — if it's one
+  # of ours (previous deployment under another folder name), remove it.
+  OLD_CT=$(docker ps --format '{{.Names}}\t{{.Ports}}' | grep "${WEB_PORT}->" | cut -f1 | head -1)
+  if [ -n "${OLD_CT:-}" ] && echo "$OLD_CT" | grep -q 'techrisk'; then
+    say "Removing previous techrisk container: $OLD_CT"
+    docker rm -f "$OLD_CT" >/dev/null
+    for i in $(seq 1 10); do
+      (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " || break
+      sleep 1
+    done
+    (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " \
+      && die "port still busy after removing $OLD_CT" || say "Port ${WEB_PORT} is free"
+  fi
+  if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " \
+     && echo "$HOLDER_NAME" | grep -qE 'go-monitoring|techrisk'; then
     # the previous generation of this tool — stop its service (so it stays
     # dead across reboots) or the bare process, then take the port
     UNIT=$(systemctl status "$HOLDER_PID" 2>/dev/null | head -1 | awk '{print $2}')
