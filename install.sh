@@ -96,8 +96,10 @@ if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} "; 
     (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " \
       && die "port still busy after removing $OLD_CT" || say "Port ${WEB_PORT} is free"
   fi
-  if (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} " \
-     && echo "$HOLDER_NAME" | grep -qE 'go-monitoring|techrisk'; then
+  # re-check before deciding anything further — the removal above may have freed it
+  if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":${WEB_PORT} "; then
+    : # freed by the container removal — continue to start
+  elif echo "$HOLDER_NAME" | grep -qE 'go-monitoring|techrisk'; then
     # the previous generation of this tool — stop its service (so it stays
     # dead across reboots) or the bare process, then take the port
     UNIT=$(systemctl status "$HOLDER_PID" 2>/dev/null | head -1 | awk '{print $2}')
