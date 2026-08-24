@@ -155,7 +155,8 @@ export class ComparisonCapture {
     }, selector);
     await sleep(300);
     if (!commitModel) return;
-    await page.evaluate((sel, val) => {
+    // Playwright evaluate takes ONE arg after the function — wrap in an object.
+    await page.evaluate(({ sel, val }) => {
       const input = document.querySelector(sel);
       if (!input || !window.angular) return;
       const el = angular.element(input);
@@ -171,7 +172,7 @@ export class ComparisonCapture {
         if (scope.$$phase) scope.$eval(assign);
         else scope.$apply(assign);
       }
-    }, selector, value);
+    }, { sel: selector, val: value });
   }
 
   async #hoverChartLink() {
