@@ -253,12 +253,12 @@
 
 <header class="top">
   <div class="wrap">
-    <div class="brand">
+    <h1 class="brand">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M12 3 2.5 20h19L12 3z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/>
       </svg>
       TechRisk Monitor
-    </div>
+    </h1>
     <div class="spacer"></div>
     <span id="sse-pill" class="pill"><span class="dot"></span><span id="sse-text">connecting</span></span>
     <span id="status-pill" class="pill"><span class="dot"></span><span id="status-text">…</span></span>
@@ -326,22 +326,17 @@
     <div><label class="flabel" for="f-to">To</label><input type="date" id="f-to" class="ctl"></div>
     <div><label class="flabel" for="f-size">Size</label>
       <select id="f-size" class="ctl"><option>10</option><option>25</option><option>50</option></select></div>
+    <button type="button" class="btn" id="f-backup" title="Download every run in the From/To range (screenshots + JSON + CSV) as one ZIP">Backup ZIP ↓</button>
     <button id="f-clear" class="btn">Clear</button>
     <button type="button" class="link" id="legend-open" aria-expanded="false" aria-controls="legend">P-levels?</button>
     <div id="legend" class="legend-pop" tabindex="-1">
       <div style="font-weight:650;margin-bottom:8px">How P-levels are determined</div>
-      <div style="margin-bottom:4px"><span class="sev sev-P1">P1</span> 100% drop &gt; 15 min, or ≥50% drop ≥ 120 min</div>
-      <div style="margin-bottom:4px"><span class="sev sev-P2">P2</span> 20–50% drop ≥ 720 min, or ≥50% drop &gt; 15 min</div>
-      <div style="margin-bottom:4px"><span class="sev sev-P3">P3</span> &lt;50% drop ≥ 120 min</div>
-      <div style="margin-bottom:4px"><span class="sev sev-P4">P4</span> any drop &gt; 15 min</div>
+      <div class="muted" style="margin-bottom:8px">Percentage = compare window vs baseline (negative = drop). Across windows the worst level wins and durations add up. Durations are minimum sustained time; DANA Cicil thresholds are absolute success counts, not percentages.</div>
       <div style="margin-bottom:4px"><span class="sev sev-OK">No Incident</span> no drop measured</div>
       <div style="margin-bottom:8px"><span class="sev sev-FAIL">CAPTURE FAILED</span> nothing measured — site error, not "healthy"</div>
       <details>
         <summary>Per-module thresholds</summary>
-        <div class="muted">Percentage = compare window vs baseline window (negative = drop). Duration = window length; across windows the worst level wins and durations add up. Example: 75-minute window at −60% → P2.<br>
-        Per-module (ATI policy ID-ARC-PRO-02): trade_trends = the table above (zero → P1 at 15 min). VA topup &amp; x2x (Topup / P2P): total outage or ≥50% drop → P2, P1 at 6 h; 20–50% → P4, P3 at 6 h, P2 at 12 h. Cashout (non-critical fn): any drop → P4, P3 at 6 h, P2 at 12 h; total outage → P2, P1 at 6 h.<br>
-        Hold Login: ≥50% drop → P2, 30–50% → P3, &lt;30% → P4 — each escalates one level at 6 h. User Register: ≥50% → P3, &lt;50% → P4, one level up at 6 h (15-min averages).<br>
-        DANA Cicil thresholds are absolute success counts, not percentages (Edik V.5.0): zero → P1; ≤10 → P2, P1 at 2 h; ≤29 → P4, P3 at 2 h, P2 at 12 h; ≤41 → P4, P3 at 2 h; &gt;41 → below every cap.</div>
+        <div id="legend-modules" class="muted" style="font-size:12px">loading…</div>
       </details>
     </div>
   </div>
@@ -445,18 +440,32 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) docu
 // Relative times tick without re-rendering the list.
 setInterval(() => $$('.rel').forEach(el => { el.textContent = relText(el.dataset.iso); }), 30000);
 
+// Title face is human ("all modules · Aug 18 vs Aug 19"); the exact window
+// arithmetic lives one line down in tabular digits, where columns parse it.
+const md = (isoDate) => new Date(isoDate + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+const winText = (w) => `${w.from.slice(5)} vs ${w.to.slice(5)} ${w.start === '00:00:00' && w.end === '23:59:59' ? 'full day' : w.start.slice(0, 5) + '–' + w.end.slice(0, 5)}`;
 function runTitle(run, fullDates = false) {
   const e = run.entries;
   if (!e) return run.task;
   const mods = e.modules?.length === modCount ? 'all modules' : (e.modules || []).map(disp).join(', ');
-  const d = (x) => fullDates ? x : x.slice(5); // compact MM-DD; full keeps the year (title tooltips)
-  if (e.windows?.length) {
-    return `${mods} · ${e.windows.length} window${e.windows.length > 1 ? 's' : ''}: ${e.windows.map(w =>
-      `${d(w.from)} vs ${d(w.to)} ${w.start === '00:00:00' && w.end === '23:59:59' ? 'full day' : w.start.slice(0, 5) + '–' + w.end.slice(0, 5)}`).join(' · ')}`;
+  if (fullDates) { // exact serialization with years — kept whole for tooltips
+    if (e.windows?.length) return `${mods} · ${e.windows.length} window${e.windows.length > 1 ? 's' : ''}: ${e.windows.map(w =>
+      `${w.from} vs ${w.to} ${w.start === '00:00:00' && w.end === '23:59:59' ? 'full day' : w.start.slice(0, 5) + '–' + w.end.slice(0, 5)}`).join(' · ')}`;
+    const full = e.start === '00:00:00' && e.end === '23:59:59';
+    return `${mods} · ${e.from} vs ${e.to}${full ? ' · full day' : ` · ${e.start.slice(0, 5)}–${e.end.slice(0, 5)}`}`;
   }
-  const full = e.start === '00:00:00' && e.end === '23:59:59';
-  return `${mods} · ${e.from} vs ${e.to}${full ? ' · full day' : ` · ${e.start.slice(0, 5)}–${e.end.slice(0, 5)}`}`;
+  const f = e.windows?.[0] || (e.from ? e : null); // empty runs have neither — mods alone
+  if (!f) return mods;
+  const full = f.start === '00:00:00' && f.end === '23:59:59';
+  return `${mods} · ${md(f.from)} vs ${md(f.to)}${full ? ' · full day' : ''}`;
 }
+// Exact windows for the hero meta line — tabular numerals do the parsing there.
+const winList = (e) => {
+  if (e.windows?.length) return e.windows.map(winText).join(' · ');
+  if (!e.from) return '';
+  const full = e.start === '00:00:00' && e.end === '23:59:59';
+  return `${e.from.slice(5)} vs ${e.to.slice(5)}${full ? ' · full day' : ` · ${e.start.slice(0, 5)}–${e.end.slice(0, 5)}`}`;
+};
 
 // ── filters + pagination ─────────────────────────────────────────────────
 // Filter/page state lives in the hash — refresh and share keep the view.
@@ -525,14 +534,16 @@ $('#form-toggle').onclick = () => {
 };
 const iso = (d) => d.toISOString().slice(0, 10);
 // Fields start empty like the filters — no assumed dates; empty times mean the full day.
+// Every row carries its own field labels — baseline/compare semantics must be
+// on the screen, not in the operator's memory (transposition = wrong verdict).
 const winTpl = (i) => `
   <div class="win">
     ${i > 0 ? `<div class="flabel win-cap">Window ${i + 1}</div>` : ''}
     <div class="win-row">
-      <div>${i > 0 ? '' : '<label class="flabel">Baseline (from)</label>'}<input type="date" class="ctl w-from" aria-label="window ${i + 1} baseline date"></div>
-      <div>${i > 0 ? '' : '<label class="flabel">Compare (to)</label>'}<input type="date" class="ctl w-to" aria-label="window ${i + 1} compare date"></div>
-      <div>${i > 0 ? '' : '<label class="flabel">Start</label> <span class="muted" style="font-size:11px">(empty = 00:00)</span>'}<input type="time" step="1" class="ctl w-start" aria-label="window ${i + 1} start time"></div>
-      <div>${i > 0 ? '' : '<label class="flabel">End</label> <span class="muted" style="font-size:11px">(empty = 23:59)</span>'}<input type="time" step="1" class="ctl w-end" aria-label="window ${i + 1} end time"></div>
+      <div><label class="flabel">Baseline (from)</label><input type="date" class="ctl w-from" aria-label="window ${i + 1} baseline date"></div>
+      <div><label class="flabel">Compare (to)</label><input type="date" class="ctl w-to" aria-label="window ${i + 1} compare date"></div>
+      <div><label class="flabel">Start${i === 0 ? ' <span class="muted" style="font-size:11px">(empty = 00:00)</span>' : ''}</label><input type="time" step="1" class="ctl w-start" aria-label="window ${i + 1} start time"></div>
+      <div><label class="flabel">End${i === 0 ? ' <span class="muted" style="font-size:11px">(empty = 23:59)</span>' : ''}</label><input type="time" step="1" class="ctl w-end" aria-label="window ${i + 1} end time"></div>
       <div>${i > 0 ? '<button type="button" class="btn w-del" style="padding:2px 8px" aria-label="remove window ' + (i + 1) + '">✕</button>' : ''}</div>
     </div>
   </div>`;
@@ -579,7 +590,9 @@ async function submitCapture(args, mods) {
   catch { return setMsg("Couldn't reach the server — check it's running.", true); }
   if (r.status === 409) return setMsg(body.error || 'A capture is already running.', true);
   if (!r.ok) return setMsg(body.error || `Capture request failed (${r.status}).`, true);
-  setMsg(`Running ${(mods || []).join(', ')}…`);
+  // queued > 0 means another capture is in flight — this one runs right after.
+  setMsg(body.queued > 0 ? `Queued (${body.queued} waiting) — runs automatically when the current capture finishes.`
+                         : `Running ${(mods || []).join(', ')}…`);
   $('#run').disabled = true;
   $('#form-toggle').click(); // collapse form — results own the page
 }
@@ -595,12 +608,13 @@ function rerun(run) {
 
 // Downloads go through fetch so the token stays in a header, never a URL.
 // Failure feeds back at the point of action — the button itself becomes the retry.
-async function dl(btn) {
-  const { dl: path, name } = btn.dataset;
+async function downloadUrl(path, name, btn) {
   const r = await api(path).catch(() => null);
   if (!r || !r.ok) {
     const orig = btn.textContent;
-    btn.textContent = 'download failed — retry';
+    let msg = null;
+    if (r && r.headers.get('content-type')?.includes('json')) msg = (await r.json().catch(() => null))?.error;
+    btn.textContent = msg || 'download failed — retry';
     btn.classList.add('err');
     setTimeout(() => { btn.textContent = orig; btn.classList.remove('err'); }, 4000);
     return;
@@ -609,6 +623,14 @@ async function dl(btn) {
   Object.assign(document.createElement('a'), { href: u, download: name }).click();
   URL.revokeObjectURL(u);
 }
+const dl = (btn) => downloadUrl(btn.dataset.dl, btn.dataset.name, btn);
+// Backup: everything the From/To filter covers (screenshots + JSON + CSV) in one ZIP.
+$('#f-backup').onclick = () => {
+  const p = new URLSearchParams();
+  if (filt.from) p.set('from', filt.from);
+  if (filt.to) p.set('to', filt.to);
+  return downloadUrl('/api/backup?' + p, `techrisk-backup_${filt.from || 'all'}_${filt.to || 'all'}.zip`, $('#f-backup'));
+};
 document.addEventListener('click', (e) => {
   const d = e.target.closest('[data-dl]');
   if (d) return dl(d);
@@ -630,28 +652,32 @@ async function stopCapture(btn) {
   if (!r || !r.ok) { btn.disabled = false; if (step) step.textContent = 'stop failed — try again'; }
 }
 
-// Delete: two-click guard — first click arms ("Sure?" in red, 3s), second fires.
+// Delete: two-click guard — first click arms ("Sure?", red, 3s), second fires.
+// Red is the armed state's voice only; at rest Delete is a plain secondary
+// button — verdict color never means "destructive".
+const disarmDel = (btn, keepText = false) => {
+  if (!keepText) btn.textContent = btn.dataset.orig || 'Delete';
+  btn.classList.remove('err');
+  btn.style.borderColor = '';
+  delete btn.dataset.armed;
+};
 function delRun(btn) {
   if (btn.dataset.armed) {
     clearTimeout(+btn.dataset.armed);
     api('/api/runs/' + btn.dataset.delRun, { method: 'DELETE' }).then(async r => {
       if (r.ok) return load();
-      const body = await r.json().catch(() => ({}));
       if (r.status === 409) { btn.textContent = 'stop the capture first'; setTimeout(load, 2500); }
       else if (r.status === 404) { btn.textContent = 'already deleted'; setTimeout(load, 1500); }
-      else { btn.textContent = 'delete failed — retry?'; delete btn.dataset.armed; }
-      if (r.status === 409 || r.status === 404) { btn.style.borderColor = ''; }
+      else { btn.textContent = 'delete failed — retry?'; }
+      disarmDel(btn, true); // keep the failure text; color returns to rest
     });
     return;
   }
   btn.dataset.orig = btn.textContent;
   btn.textContent = 'Sure?';
+  btn.classList.add('err');
   btn.style.borderColor = 'var(--sev-1)';
-  btn.dataset.armed = setTimeout(() => {
-    btn.textContent = btn.dataset.orig;
-    btn.style.borderColor = '';
-    delete btn.dataset.armed;
-  }, 3000);
+  btn.dataset.armed = setTimeout(() => disarmDel(btn), 3000);
 }
 
 // ── rendering ────────────────────────────────────────────────────────────
@@ -661,7 +687,7 @@ function moduleCells(s) {
     <td>${badge(s.incidentLevel)}${s.reason ? `<div class="muted" style="font-size:11px;margin-top:3px" title="${esc(s.reason)}">${clipReason(s.reason)}</div>` : ''}</td>
     <td>${pct(s)}</td>
     <td class="num">${s.durationMinutes ?? '—'} min${s.windows > 1 ? ` <span class="muted" style="font-size:11px">(${s.windows}w)</span>` : ''}</td>
-    <td class="num muted">${s.entriesWithData}/${s.entriesWithDate}</td>
+    <td class="num${s.entriesWithData === s.entriesWithDate ? '' : ' muted'}"${s.entriesWithData === s.entriesWithDate ? '' : ' title="windows that produced data ÷ windows queried — 0/' + s.entriesWithDate + ' means the site returned nothing, not that nothing dropped"'}>${s.entriesWithData}/${s.entriesWithDate}</td>
   </tr>`;
 }
 const gridHead = `<thead><tr><th scope="col">Module</th><th scope="col">Level</th><th scope="col">Avg change</th><th scope="col">Duration</th><th scope="col" title="comparison windows that produced data ÷ windows queried — 0/2 means the site returned nothing, not that nothing dropped">Data</th></tr></thead>`;
@@ -669,7 +695,7 @@ const actions = (run) => `
         <button type="button" class="btn" data-dl="/output/${run.dir}/report.csv" data-name="report.csv">report.csv ↓</button>
         <button type="button" class="btn" data-dl="/api/runs/${run.dir}" data-name="${run.dir}.json">JSON ↓</button>
         <button type="button" class="btn" data-rerun="${run.dir}" title="Run this exact configuration again">Re-run</button>
-        <button type="button" class="btn" data-del-run="${run.dir}" title="Delete this run and its screenshots" style="color:var(--sev-1)">Delete</button>`;
+        <button type="button" class="btn" data-del-run="${run.dir}" title="Delete this run and its screenshots">Delete</button>`;
 
 function heroRun(run) {
   const worst = worstLevel(run.summaries);
@@ -679,7 +705,7 @@ function heroRun(run) {
       ${badge(worst, 'hero-level')}
       <div style="min-width:0">
         <div style="font-weight:650;overflow-wrap:anywhere" title="${runTitle(run, true)}">${runTitle(run)}</div>
-        <div class="hero-meta">${rel(run.generatedAt)} · ${nWins(run.entries?.windows?.length || 1)}</div>
+        <div class="hero-meta">${rel(run.generatedAt)}${run.entries ? ` · ${nWins(run.entries.windows?.length || 1)}` : ''}${run.entries && winList(run.entries) ? ` · <span class="num">${winList(run.entries)}</span>` : ''}</div>
       </div>
       <div class="spacer" style="display:flex;gap:8px">${actions(run)}</div>
     </div>
@@ -703,7 +729,7 @@ function runningCard(run) {
         <div class="hero-meta run-detail">${run.progress?.detail || ''}</div>
         <div class="hero-meta">${run.entries.modules.map(disp).join(', ')} · ${nWins(run.entries.windows?.length || 1)} · started ${new Date(run.startedAt).toLocaleTimeString()}</div>
       </div>
-      <div class="spacer" style="display:flex;gap:8px"><button type="button" class="btn" data-stop style="color:var(--sev-1)">Stop</button></div>
+      <div class="spacer" style="display:flex;gap:8px"><button type="button" class="btn" data-stop>Stop</button></div>
     </div>
     <div style="padding:0 20px 14px">
       <div class="bar" style="margin-bottom:8px"><i></i></div>
@@ -850,13 +876,13 @@ async function loadShots(dir) {
     const val = r2.hasData ? `${fmt(r2.value1)} → ${fmt(r2.value2)} (${pctv}%)` : (r2.reason || 'no data');
     return `
     <figure>
-      <div class="imgbox"><img loading="lazy" src="${qs('/' + r2.screenshot)}" alt="${disp(r2.module)} chart, ${dates}: ${val}"></div>
+      <div class="imgbox"><img loading="lazy" src="${qs('/' + r2.screenshot)}" alt="${esc(disp(r2.module) + ' chart, ' + dates + ': ' + val)}"></div>
       <figcaption class="shot-cap">
         <div class="ctx"><span class="mod">${disp(r2.module)}</span> · ${compact}</div>
         ${r2.hasData
           ? `<div class="shot-vals"><span class="num">${fmt(r2.value1)}</span><span class="arrow">→</span><span class="num">${fmt(r2.value2)}</span>
              <span class="delta-chip ${below ? 'neg' : 'pos'}" title="compare is ${Math.abs(pctv)}% ${below ? 'below' : 'above'} baseline">${pctv}%</span></div>`
-          : `<div class="shot-vals muted" style="font-style:italic">${val}</div>`}
+          : `<div class="shot-vals muted" style="font-style:italic">${esc(val)}</div>`}
       </figcaption>
     </figure>`;
   }).join('') || '<div class="muted" style="font-size:12px">No screenshots — capture failed before the screenshot stage.</div>';
@@ -882,7 +908,8 @@ async function pollStatus() {
     $('#login').style.display = (!token() && r.status === 401) ? '' : 'none';
   } catch { return false; }
   const pill = $('#status-pill'), txt = $('#status-text');
-  if (s.running) { pill.className = 'pill busy'; txt.textContent = 'capture running'; return true; }
+  if (s.running) { pill.className = 'pill busy'; txt.textContent = s.queueLength ? `capture running · ${s.queueLength} queued` : 'capture running'; return true; }
+  if (s.queueLength) { pill.className = 'pill busy'; txt.textContent = `${s.queueLength} queued — starting next`; return true; }
   if (s.finishedAt) { pill.className = 'pill ' + (s.ok ? 'live' : 'busy'); pill.querySelector('.dot').style.background = s.ok ? 'var(--sev-ok)' : 'var(--sev-1)'; txt.textContent = (s.ok ? 'last run OK · ' : 'last run FAILED · ') + relText(s.finishedAt); }
   else { pill.className = 'pill'; txt.textContent = 'idle'; }
   return s.running;
@@ -941,6 +968,29 @@ function startEvents() {
 // Offline fallback keeps the page usable; config stays the single source of truth.
 const FALLBACK_MODULES = ['trade_trends', 'cashout', 'va_topup', 'x2x', 'hold_login', 'user_register', 'dana_cicil'];
 let modCount = FALLBACK_MODULES.length;
+
+// P-levels legend renders the classifier's own rule tables from /api/modules —
+// hand-copied prose here could only drift from src/config.js. Two shapes come
+// over the wire: named-key matrices (trade_trends, va_topup, x2x) and band
+// arrays (everything else, including dana_cicil's absolute counts).
+const durText = (m) => m >= 60 && m % 60 === 0 ? `${m / 60} h` : `${m} min`;
+const KEY_RULES = {
+  p1_100pct_drop_min: (v) => `total outage for ${durText(v)} → ${badge('P1')}`,
+  p1_50pct_drop_min: (v) => `≥50% for ${durText(v)} → ${badge('P1')}`,
+  p2_20to50pct_drop_min: (v) => `20–50% for ${durText(v)} → ${badge('P2')}`,
+  p2_50pct_drop_min: (v) => `≥50% for ${durText(v)} → ${badge('P2')}`,
+  p3_under50pct_drop_min: (v) => `<50% for ${durText(v)} → ${badge('P3')}`,
+  p4_any_drop_min: (v) => `any drop for ${durText(v)} → ${badge('P4')}`,
+};
+const bandText = (b) => `${b.maxValue !== undefined ? `value ≤ ${b.maxValue}`
+  : b.minDrop === undefined ? 'any drop'
+  : b.minDrop === 100 ? 'total outage'
+  : b.maxDrop !== undefined ? `${b.minDrop}–${b.maxDrop}%`
+  : `≥${b.minDrop}%`} for ${durText(b.minDur)} → ${badge(b.level)}`;
+const rulesHtml = (rules) => !rules ? ''
+  : rules.bands ? rules.bands.map(bandText).join('<br>')
+  : Object.entries(rules).map(([k, v]) => KEY_RULES[k]?.(v)).filter(Boolean).join('<br>');
+
 async function loadModules() {
   const mods = await api('/api/modules').then(r => r.ok ? r.json() : null).catch(() => null)
     || FALLBACK_MODULES.map((name) => ({ name, retentionDays: name === 'va_topup' ? 3 : null }));
@@ -949,6 +999,10 @@ async function loadModules() {
     <label class="chip"><input type="checkbox" name="mod" value="${m.name}" checked>${disp(m.name)}${m.retentionDays ? ` <span class="muted" style="font-size:11px">~${m.retentionDays}d</span>` : ''}</label>`).join('');
   $('#f-module').insertAdjacentHTML('beforeend', mods.map(m => `<option value="${m.name}">${disp(m.name)}</option>`).join(''));
   $('#f-module').value = filt.module; // re-apply hash-restored filter now that options exist
+  $('#legend-modules').innerHTML = mods.map((m) => {
+    const r = rulesHtml(m.rules);
+    return r ? `<div style="margin-top:8px"><span style="color:var(--ink);font-weight:600">${disp(m.name)}</span><br>${r}</div>` : '';
+  }).join('') || 'thresholds unavailable — the server is offline.';
 }
 
 bindFilters();

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { runCapture, requestAbort } from './main.js';
 import { parseArgs, DATA_DIR, MODULES } from './config.js';
 import { MysqlSink } from './mysql-sink.js';
+import yazl from 'yazl';
 
 // The data directory IS the database: each run dir holds incidents.json,
 // report.csv and screenshots. This server lists/serves them and can trigger a
@@ -20,6 +21,8 @@ const MIME = {
   '.json': 'application/json',
   '.csv': 'text/csv',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
   '.js': 'text/javascript',
   '.css': 'text/css',
 };
@@ -30,6 +33,52 @@ const CACHEABLE = new Set(['.css', '.js', '.png']);
 let running = false;
 let lastRun = { finishedAt: null, ok: null, error: null };
 let currentRun = null; // { startedAt, args, moduleList, steps: [{at, step, detail}] }
+
+// One browser, one session — captures can only run one at a time. Requests
+// that arrive mid-run queue FIFO instead of being rejected; drain() starts
+// the next as each run finishes.
+const queue = []; // { args, enqueuedAt }
+const MAX_QUEUE = 20;
+
+function startQueuedRun(job) {
+  running = true;
+  currentRun = { startedAt: new Date().toISOString(), args: job.args, steps: [] };
+  broadcast('run-started', { startedAt: currentRun.startedAt, args: job.args });
+  console.log(`[api] capture starting (${queue.length} queued behind): ${job.args.moduleList}`);
+  runCapture(job.args, {
+    onProgress: (p) => {
+      currentRun?.steps.push({ at: p.at, step: p.step, detail: p.detail });
+      broadcast('progress', p);
+    },
+  })
+    .then((out) => {
+      lastRun = { finishedAt: new Date().toISOString(), ok: !out.stopped, dir: out.dir };
+      broadcast('run-finished', { ok: !out.stopped, stopped: !!out.stopped, dir: out.dir });
+    })
+    .catch((e) => {
+      lastRun = { finishedAt: new Date().toISOString(), ok: false, error: e.message };
+      broadcast('run-finished', { ok: false, error: e.message });
+    })
+    .finally(() => {
+      running = false;
+      currentRun = null;
+      drain();
+    });
+}
+
+function drain() {
+  if (running || queue.length === 0) return;
+  const job = queue.shift();
+  try {
+    startQueuedRun(job);
+  } catch (e) {
+    // runCapture threw synchronously (never returned a promise) — record it
+    // and keep the queue flowing instead of freezing `running` forever.
+    lastRun = { finishedAt: new Date().toISOString(), ok: false, error: e.message };
+    broadcast('run-finished', { ok: false, error: e.message });
+    drain();
+  }
+}
 
 // Live updates via Server-Sent Events — the UI never needs a manual refresh.
 const sseClients = new Set();
@@ -47,6 +96,31 @@ const json = (res, code, body) => {
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
 };
+
+// Runs are immutable once written — cache the parsed incidents.json keyed on
+// mtime so each /api/runs request doesn't re-read every retained run's
+// (tableRows-embedding, large) JSON. Corrupt files are skipped, not fatal.
+const runCache = new Map(); // dir → { mtimeMs, meta }
+function loadRunMeta(dir) {
+  const file = path.join(OUTPUT_ROOT, dir, 'incidents.json');
+  let mtimeMs;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    runCache.delete(dir);
+    return null; // not a run dir (no incidents.json)
+  }
+  const hit = runCache.get(dir);
+  if (hit && hit.mtimeMs === mtimeMs) return hit.meta;
+  try {
+    const meta = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    runCache.set(dir, { mtimeMs, meta });
+    return meta;
+  } catch (e) {
+    console.log(`[api] skipping unreadable run ${dir}: ${e.message}`);
+    return null;
+  }
+}
 
 function listRuns() {
   const runs = [];
@@ -73,12 +147,9 @@ function listRuns() {
     });
   }
   if (fs.existsSync(OUTPUT_ROOT)) {
-    for (const dir of fs
-      .readdirSync(OUTPUT_ROOT)
-      .filter((d) => fs.existsSync(path.join(OUTPUT_ROOT, d, 'incidents.json')))
-      .sort()
-      .reverse()) {
-      const meta = JSON.parse(fs.readFileSync(path.join(OUTPUT_ROOT, dir, 'incidents.json'), 'utf-8'));
+    for (const dir of fs.readdirSync(OUTPUT_ROOT).sort().reverse()) {
+      const meta = loadRunMeta(dir);
+      if (!meta) continue;
       const windows = meta.results?.map((r) => r.entry) || [];
       runs.push({
         dir,
@@ -128,33 +199,53 @@ const server = http.createServer(async (req, res) => {
       return serveFile(res, OUTPUT_ROOT, url.pathname.replace('/api/runs', '') + '/incidents.json');
     }
 
+    // Backup: one ZIP of everything (screenshots + incidents.json + report.csv)
+    // for a date range — the archival answer to pruneRuns deleting old runs.
+    // Runs are picked by the UTC date embedded in the dir name; incidents.json
+    // presence marks a completed run (in-flight captures and audit dirs are
+    // skipped), so the ZIP holds exactly the runs /api/runs lists.
+    if (route === 'GET /api/backup') {
+      const from = url.searchParams.get('from') || '';
+      const to = url.searchParams.get('to') || '';
+      if ((from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) || (to && !/^\d{4}-\d{2}-\d{2}$/.test(to)))
+        return json(res, 400, { error: 'invalid date — use YYYY-MM-DD' });
+      // Snapshot before writeHead: any throw here still answers as JSON.
+      const picked = [];
+      if (fs.existsSync(OUTPUT_ROOT)) {
+        for (const dir of fs.readdirSync(OUTPUT_ROOT).sort()) {
+          const date = dir.match(/^[A-Za-z0-9_.-]+_(\d{4}-\d{2}-\d{2})T/)?.[1];
+          if (!date || (from && date < from) || (to && date > to)) continue;
+          if (!fs.existsSync(path.join(OUTPUT_ROOT, dir, 'incidents.json'))) continue;
+          picked.push({ dir, date });
+        }
+      }
+      if (picked.length === 0) return json(res, 404, { error: 'no runs in this date range' });
+      const zip = new yazl.ZipFile();
+      for (const { dir } of picked) {
+        for (const f of fs.readdirSync(path.join(OUTPUT_ROOT, dir), { withFileTypes: true })) {
+          if (f.isFile()) zip.addFile(path.join(OUTPUT_ROOT, dir, f.name), `${dir}/${f.name}`);
+        }
+      }
+      const name = `techrisk-backup_${from || picked[0].date}_to_${to || picked.at(-1).date}.zip`;
+      res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${name}"` });
+      // A dir vanishing mid-stream (prune/delete race) kills the response —
+      // the UI's retry feedback covers it; no partial archive.
+      zip.on('error', () => res.destroy());
+      zip.outputStream.on('error', () => res.destroy());
+      zip.end();
+      zip.outputStream.pipe(res);
+      console.log(`[api] backup zip: ${picked.length} runs (${name})`);
+      return;
+    }
+
     if (route === 'POST /api/capture') {
-      if (running) return json(res, 409, { error: 'capture already running' });
-      running = true;
-      console.log(`[api] capture triggered: ${url.search}`);
+      if (queue.length >= MAX_QUEUE) return json(res, 429, { error: `queue full (${MAX_QUEUE} waiting) — try again later` });
       const args = parseArgs((url.searchParams.get('args') || '').split(/\s+/).filter(Boolean));
-      currentRun = { startedAt: new Date().toISOString(), args, steps: [] };
-      broadcast('run-started', { startedAt: currentRun.startedAt, args });
-      json(res, 202, { started: true, args });
-      // Fire and forget — live progress streams over /api/events.
-      runCapture(args, {
-        onProgress: (p) => {
-          currentRun?.steps.push({ at: p.at, step: p.step, detail: p.detail });
-          broadcast('progress', p);
-        },
-      })
-        .then((out) => {
-          lastRun = { finishedAt: new Date().toISOString(), ok: !out.stopped, dir: out.dir };
-          broadcast('run-finished', { ok: !out.stopped, stopped: !!out.stopped, dir: out.dir });
-        })
-        .catch((e) => {
-          lastRun = { finishedAt: new Date().toISOString(), ok: false, error: e.message };
-          broadcast('run-finished', { ok: false, error: e.message });
-        })
-        .finally(() => {
-          running = false;
-          currentRun = null;
-        });
+      const startedNow = !running; // drain() below starts it immediately when idle
+      queue.push({ args, enqueuedAt: new Date().toISOString() });
+      console.log(`[api] capture requested: ${url.search} (queue: ${queue.length})`);
+      drain();
+      json(res, 202, { started: true, queued: startedNow ? 0 : queue.length });
       return;
     }
 
@@ -177,19 +268,23 @@ const server = http.createServer(async (req, res) => {
       const target = path.join(OUTPUT_ROOT, dir);
       if (!fs.existsSync(target)) return json(res, 404, { error: 'run not found' });
       fs.rmSync(target, { recursive: true, force: true });
+      runCache.delete(dir);
       console.log(`[api] deleted run ${dir}`);
       return json(res, 200, { deleted: dir });
     }
 
     if (route === 'GET /api/modules') {
-      // Single source of truth: the form chips and the Module filter render from this.
+      // Single source of truth: the form chips, the Module filter, and the
+      // P-levels legend all render from this — rules included, so the legend
+      // can never drift from the classifier.
       return json(res, 200, Object.keys(MODULES).map((m) =>
-        ({ name: m, retentionDays: MODULES[m].retentionDays ?? null })));
+        ({ name: m, retentionDays: MODULES[m].retentionDays ?? null, rules: MODULES[m].rules ?? null })));
     }
 
     if (route === 'GET /api/status') {
       return json(res, 200, {
         running,
+        queueLength: queue.length,
         ...(currentRun
           ? { progress: currentRun.steps.at(-1), startedAt: currentRun.startedAt, args: currentRun.args }
           : {}),
@@ -256,14 +351,13 @@ if (DAILY_AT) {
   setInterval(() => {
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
-    if (running || lastFired === today) return;
+    if (running || queue.length > 0 || lastFired === today) return; // don't jump queued manual runs
     if (now.getHours() !== h || now.getMinutes() !== m) return;
     lastFired = today;
     console.log(`[scheduler] starting daily capture: ${process.env.CAPTURE_ARGS || '--modules all'}`);
-    running = true;
-    runCapture(parseArgs((process.env.CAPTURE_ARGS || '--modules all').split(/\s+/)))
-      .then((out) => (lastRun = { finishedAt: new Date().toISOString(), ok: true, dir: out.dir }))
-      .catch((e) => (lastRun = { finishedAt: new Date().toISOString(), ok: false, error: e.message }))
-      .finally(() => (running = false));
+    // Through the same queue as manual runs — the scheduled capture gets the
+    // running card, progress log and SSE events like any other.
+    queue.push({ args: parseArgs((process.env.CAPTURE_ARGS || '--modules all').split(/\s+/)), enqueuedAt: new Date().toISOString() });
+    drain();
   }, 20000);
 }
