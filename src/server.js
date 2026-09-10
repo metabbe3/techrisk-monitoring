@@ -16,6 +16,10 @@ const OUTPUT_ROOT = path.resolve(DATA_DIR);
 const WEB_ROOT = path.resolve('web');
 const API_TOKEN = process.env.API_TOKEN || null; // set to require ?token= / X-API-Token
 
+// Daily incremental backup of new runs (see backupNewRuns at the bottom).
+const BACKUP_DIR = process.env.BACKUP_DIR === '' ? null : process.env.BACKUP_DIR || path.join(OUTPUT_ROOT, 'backups');
+const BACKUP_AT = process.env.BACKUP_DAILY_AT === '' ? null : process.env.BACKUP_DAILY_AT || '23:47';
+
 const MIME = {
   '.html': 'text/html',
   '.json': 'application/json',
@@ -168,6 +172,62 @@ function listRuns() {
   return runs;
 }
 
+// Files of the given run dirs as [absPath, zipEntryPath] — shared by the
+// /api/backup endpoint and the daily backup job. Run dirs are flat.
+function runDirFiles(dirs) {
+  const files = [];
+  for (const dir of dirs) {
+    for (const f of fs.readdirSync(path.join(OUTPUT_ROOT, dir), { withFileTypes: true })) {
+      if (f.isFile()) files.push([path.join(OUTPUT_ROOT, dir, f.name), `${dir}/${f.name}`]);
+    }
+  }
+  return files;
+}
+
+// One incremental backup: every completed run newer than the watermark gets
+// zipped; the watermark advances only after the zip lands, so a failure just
+// retries the same runs next schedule. Calls are serialized — the boot
+// catch-up and the scheduler (or a manual trigger) racing into the same
+// filename would truncate each other's zip.
+let backupQueue = Promise.resolve();
+export function backupNewRuns() {
+  backupQueue = backupQueue.then(doBackupNewRuns).catch(() => {});
+  return backupQueue;
+}
+
+async function doBackupNewRuns() {
+  if (!BACKUP_DIR || !fs.existsSync(OUTPUT_ROOT)) return;
+  const mark = path.join(BACKUP_DIR, '.last-backup');
+  const last = fs.existsSync(mark) ? fs.readFileSync(mark, 'utf-8').trim() : '';
+  const dirs = fs
+    .readdirSync(OUTPUT_ROOT)
+    .filter((d) => /^\w+_\d{4}-\d{2}-\d{2}T/.test(d) && (!last || d > last)
+      && fs.existsSync(path.join(OUTPUT_ROOT, d, 'incidents.json')))
+    .sort();
+  if (!dirs.length) return;
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    // Date + time in the name: a boot catch-up and the evening schedule can
+    // both fire on the same day, and a shared name would truncate the earlier
+    // (larger) backup with the later incremental.
+    const now = new Date().toISOString();
+    const dest = path.join(BACKUP_DIR, `daily-${now.slice(0, 10)}_${now.slice(11, 19).replace(/:/g, '')}.zip`);
+    await new Promise((resolve, reject) => {
+      const zip = new yazl.ZipFile();
+      zip.on('error', reject);
+      for (const [abs, entry] of runDirFiles(dirs)) zip.addFile(abs, entry);
+      const out = fs.createWriteStream(dest);
+      out.on('error', reject).on('close', resolve);
+      zip.outputStream.pipe(out);
+      zip.end();
+    });
+    fs.writeFileSync(mark, dirs.at(-1));
+    console.log(`[backup] ${dirs.length} run(s) → ${dest}`);
+  } catch (e) {
+    console.log(`[backup] failed (${e.message}) — retried at the next schedule`);
+  }
+}
+
 function serveFile(res, root, relPath) {
   const file = path.resolve(root, '.' + relPath);
   if (!file.startsWith(root)) return json(res, 403, { error: 'forbidden' }); // traversal guard
@@ -221,11 +281,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (picked.length === 0) return json(res, 404, { error: 'no runs in this date range' });
       const zip = new yazl.ZipFile();
-      for (const { dir } of picked) {
-        for (const f of fs.readdirSync(path.join(OUTPUT_ROOT, dir), { withFileTypes: true })) {
-          if (f.isFile()) zip.addFile(path.join(OUTPUT_ROOT, dir, f.name), `${dir}/${f.name}`);
-        }
-      }
+      for (const [abs, entry] of runDirFiles(picked.map((p) => p.dir))) zip.addFile(abs, entry);
       const name = `techrisk-backup_${from || picked[0].date}_to_${to || picked.at(-1).date}.zip`;
       res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${name}"` });
       // A dir vanishing mid-stream (prune/delete race) kills the response —
@@ -339,6 +395,22 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 // Retry any capture rows that couldn't reach MySQL during earlier runs.
 const sink = new MysqlSink();
 if (sink.enabled) sink.flushPending();
+
+// Daily backup schedule (same pattern as the capture scheduler below):
+// BACKUP_DAILY_AT=HH:MM, default 23:47. Boot catch-up makes it
+// restart-proof — anything missed while down is picked up on start.
+backupNewRuns();
+if (BACKUP_AT) {
+  const [bh, bm] = BACKUP_AT.split(':').map(Number);
+  let lastFired = null;
+  setInterval(() => {
+    const now = new Date();
+    if (lastFired === now.toISOString().slice(0, 10)) return;
+    if (now.getHours() !== bh || now.getMinutes() !== bm) return;
+    lastFired = now.toISOString().slice(0, 10);
+    backupNewRuns();
+  }, 20000);
+}
 
 // Self-contained daily schedule — no host cron needed on the server.
 // CAPTURE_DAILY_AT=HH:MM (container-local time; set TZ=Asia/Jakarta),

@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
-import yazl from 'yazl';
 import { MODULES, ENV, parseArgs, DATA_DIR } from './config.js';
 import { BrowserSession } from './browser.js';
 import { AuthService } from './auth.js';
@@ -150,7 +149,7 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
     }
 
     const out = report.write();
-    await pruneRuns();
+    pruneRuns();
     progress('saving', 'writing report / MySQL / webhook');
     const sink = new MysqlSink();
     await sink.flushPending();
@@ -166,54 +165,15 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
 
 // Keep the newest RETENTION_RUNS run dirs (default 50); 0 disables.
 // Runs hold ~600KB each — without this, a daily cron grows forever.
-// Before deleting, each doomed run is zipped to PRUNE_BACKUP_DIR (default
-// <DATA_DIR>/backups; set a path to redirect — e.g. an sftp mount — or "" to
-// disable). A run that fails to archive is KEPT, never silently lost.
-const PRUNE_BACKUP_DIR =
-  process.env.PRUNE_BACKUP_DIR === '' ? null : process.env.PRUNE_BACKUP_DIR || path.join(DATA_DIR, 'backups');
-
-function zipDir(dir, dest) {
-  return new Promise((resolve, reject) => {
-    const zip = new yazl.ZipFile();
-    zip.on('error', reject);
-    for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (f.isFile()) zip.addFile(path.join(dir, f.name), f.name);
-    }
-    const out = fs.createWriteStream(dest);
-    out.on('error', reject).on('close', resolve);
-    zip.outputStream.pipe(out);
-    zip.end();
-  });
-}
-
-export async function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10)) {
+// Backups are the server's daily job (BACKUP_DIR/BACKUP_DAILY_AT), not tied
+// to pruning — 50-run retention leaves weeks of headroom over a daily backup.
+export function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10)) {
   if (!keep || !fs.existsSync(DATA_DIR)) return;
   const dirs = fs
     .readdirSync(DATA_DIR)
     .filter((d) => /^\w+_\d{4}-\d{2}-\d{2}T/.test(d))
     .sort();
-  let backupOk = false;
-  if (PRUNE_BACKUP_DIR) {
-    try {
-      fs.mkdirSync(PRUNE_BACKUP_DIR, { recursive: true });
-      backupOk = true;
-    } catch (e) {
-      // Misconfigured backup target must not mean "delete without archive".
-      console.log(`prune: backup dir unavailable (${e.message}) — keeping all runs`);
-      return;
-    }
-  }
   for (const d of dirs.slice(0, Math.max(0, dirs.length - keep))) {
-    if (backupOk) {
-      const dest = path.join(PRUNE_BACKUP_DIR, `${d}.zip`);
-      try {
-        if (!fs.existsSync(dest)) await zipDir(path.join(DATA_DIR, d), dest);
-        console.log(`archived old run: ${dest}`);
-      } catch (e) {
-        console.log(`archive of ${d} failed (${e.message}) — keeping the run dir`);
-        continue; // fail-safe: unarchived data is never deleted
-      }
-    }
     fs.rmSync(path.join(DATA_DIR, d), { recursive: true, force: true });
     console.log(`pruned old run: ${d}`);
   }
