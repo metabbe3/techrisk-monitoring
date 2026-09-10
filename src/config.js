@@ -7,7 +7,9 @@ export const MODULES = {
     rowFilter: 'Trade Success',
     aggregation: 'last_two_values',
     rules: {
-      p1_100pct_drop_min: 15,
+      // ID-TOP-PRO-02 V.5.0 p.27: ≥50% drop (incl. total outage) is ONE row —
+      // P2 base, P1 at 2 h. No 15-min P1 special case for Acquiring.
+      p1_100pct_drop_min: 120,
       p1_50pct_drop_min: 120,
       p2_20to50pct_drop_min: 720,
       p2_50pct_drop_min: 15,
@@ -37,8 +39,7 @@ export const MODULES = {
     // baselines older than this come back "no data". Used for warnings only.
     retentionDays: 3,
     rules: {
-      // PDF p.31 Topup matrix: ≥50% (incl. total outage) → P2, 6h → P1 — so the
-      // 100% special case also escalates at 6h, not at 15 min like Acquiring.
+      // PDF p.31 Topup matrix: ≥50% (incl. total outage) → P2, 6h → P1.
       p1_100pct_drop_min: 360,
       p1_50pct_drop_min: 360,
       p2_20to50pct_drop_min: 720,
@@ -155,7 +156,9 @@ export function parseArgs(argv) {
   }
 
   args.modules = single.modules;
-  args.task = single.task;
+  // Task becomes a directory name — keep it inside the [A-Za-z0-9_.-] the
+  // delete/backup endpoints accept, or the run can't be managed from the UI.
+  args.task = String(single.task).replace(/[^A-Za-z0-9_.-]/g, '_');
   args.moduleList =
     args.modules === 'all' ? Object.keys(MODULES) : args.modules.split(',').map((s) => s.trim());
   for (const m of args.moduleList) {

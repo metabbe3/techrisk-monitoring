@@ -18,7 +18,7 @@ export class IncidentReport {
   // captures = one entry per window. Level = worst window's level; duration =
   // sum of window durations (5 one-hour drops = 5 hours of incident); avg %
   // across windows that produced data.
-  addModule(moduleCfg, _entry, captures) {
+  addModule(moduleCfg, captures) {
     const valid = captures.filter((c) => c.hasData);
     // A dead capture (site 500 / nothing rendered) is NOT "No Incident" — we
     // didn't measure anything. Say so.

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
+import yazl from 'yazl';
 import { MODULES, ENV, parseArgs, DATA_DIR } from './config.js';
 import { BrowserSession } from './browser.js';
 import { AuthService } from './auth.js';
@@ -138,7 +139,7 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
         }
       }
 
-      report.addModule(cfg, args.windowList[0], captures);
+      report.addModule(cfg, captures);
       if (key !== args.moduleList[args.moduleList.length - 1]) await dashboard.reset();
     }
     } catch (e) {
@@ -149,7 +150,7 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
     }
 
     const out = report.write();
-    pruneRuns();
+    await pruneRuns();
     progress('saving', 'writing report / MySQL / webhook');
     const sink = new MysqlSink();
     await sink.flushPending();
@@ -165,13 +166,54 @@ export async function runCapture(args, { onProgress = () => {} } = {}) {
 
 // Keep the newest RETENTION_RUNS run dirs (default 50); 0 disables.
 // Runs hold ~600KB each — without this, a daily cron grows forever.
-export function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10)) {
+// Before deleting, each doomed run is zipped to PRUNE_BACKUP_DIR (default
+// <DATA_DIR>/backups; set a path to redirect — e.g. an sftp mount — or "" to
+// disable). A run that fails to archive is KEPT, never silently lost.
+const PRUNE_BACKUP_DIR =
+  process.env.PRUNE_BACKUP_DIR === '' ? null : process.env.PRUNE_BACKUP_DIR || path.join(DATA_DIR, 'backups');
+
+function zipDir(dir, dest) {
+  return new Promise((resolve, reject) => {
+    const zip = new yazl.ZipFile();
+    zip.on('error', reject);
+    for (const f of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (f.isFile()) zip.addFile(path.join(dir, f.name), f.name);
+    }
+    const out = fs.createWriteStream(dest);
+    out.on('error', reject).on('close', resolve);
+    zip.outputStream.pipe(out);
+    zip.end();
+  });
+}
+
+export async function pruneRuns(keep = parseInt(process.env.RETENTION_RUNS || '50', 10)) {
   if (!keep || !fs.existsSync(DATA_DIR)) return;
   const dirs = fs
     .readdirSync(DATA_DIR)
     .filter((d) => /^\w+_\d{4}-\d{2}-\d{2}T/.test(d))
     .sort();
+  let backupOk = false;
+  if (PRUNE_BACKUP_DIR) {
+    try {
+      fs.mkdirSync(PRUNE_BACKUP_DIR, { recursive: true });
+      backupOk = true;
+    } catch (e) {
+      // Misconfigured backup target must not mean "delete without archive".
+      console.log(`prune: backup dir unavailable (${e.message}) — keeping all runs`);
+      return;
+    }
+  }
   for (const d of dirs.slice(0, Math.max(0, dirs.length - keep))) {
+    if (backupOk) {
+      const dest = path.join(PRUNE_BACKUP_DIR, `${d}.zip`);
+      try {
+        if (!fs.existsSync(dest)) await zipDir(path.join(DATA_DIR, d), dest);
+        console.log(`archived old run: ${dest}`);
+      } catch (e) {
+        console.log(`archive of ${d} failed (${e.message}) — keeping the run dir`);
+        continue; // fail-safe: unarchived data is never deleted
+      }
+    }
     fs.rmSync(path.join(DATA_DIR, d), { recursive: true, force: true });
     console.log(`pruned old run: ${d}`);
   }
@@ -201,6 +243,7 @@ async function notifySlackWebhook(meta) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, findings }),
+      signal: AbortSignal.timeout(15000), // a hung webhook must not stall the run
     });
     console.log(`webhook notified: ${res.status}`);
   } catch (e) {
@@ -236,6 +279,7 @@ async function notifyDingtalk(meta) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ msgtype: 'markdown', markdown: { title, text } }),
+      signal: AbortSignal.timeout(15000),
     });
     const body = await res.json().catch(() => ({}));
     if (body.errcode) console.log(`dingtalk rejected: ${body.errcode} ${body.errmsg}`);

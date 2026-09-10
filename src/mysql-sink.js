@@ -14,6 +14,12 @@ import { DATA_DIR } from './config.js';
 const PENDING_FILE = path.join(DATA_DIR, '.mysql-pending.log');
 const PENDING_CAP = 1000;
 
+// Shared by save() and flushPending() — one place for the column list.
+const insertSql = (table) => `INSERT INTO ${table}
+ (run_id, task, module, captured_at, date_from, date_to, time_start, time_end,
+  value_from, value_to, percentage_change, incident_level, reason, screenshot_path, payload)
+ VALUES ?`;
+
 export class MysqlSink {
   constructor(env = process.env) {
     this.enabled = Boolean(env.MYSQL_HOST);
@@ -51,13 +57,7 @@ export class MysqlSink {
     ]);
     try {
       const conn = await this.#conn();
-      await conn.query(
-        `INSERT INTO ${this.table}
-         (run_id, task, module, captured_at, date_from, date_to, time_start, time_end,
-          value_from, value_to, percentage_change, incident_level, reason, screenshot_path, payload)
-         VALUES ?`,
-        [rows.map((r) => this.#toSqlRow(r))]
-      );
+      await conn.query(insertSql(this.table), [rows.map((r) => this.#toSqlRow(r))]);
       console.log(`mysql: ${rows.length} row(s) saved to ${this.table}`);
       return true;
     } catch (e) {
@@ -79,10 +79,7 @@ export class MysqlSink {
       for (const line of lines) {
         try {
           await conn.query(
-            `INSERT INTO ${this.table}
-             (run_id, task, module, captured_at, date_from, date_to, time_start, time_end,
-              value_from, value_to, percentage_change, incident_level, reason, screenshot_path, payload)
-             VALUES ?`,
+            insertSql(this.table),
             // NOTE: `?` needs an ARRAY OF ROWS ([[values]]), not a flat row —
             // a flat row expands without parentheses → SQL syntax error.
             [[this.#toSqlRow(JSON.parse(line))]]

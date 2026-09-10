@@ -110,7 +110,7 @@ export function incidentLevel(totalDurationMinutes, averagePercentage, rules, va
 // ponytail: assert-based self-check — `node src/analytics.js`
 if (process.argv[1] && process.argv[1].endsWith('analytics.js')) {
   const rules = {
-    p1_100pct_drop_min: 15,
+    p1_100pct_drop_min: 120,
     p1_50pct_drop_min: 120,
     p2_20to50pct_drop_min: 720,
     p2_50pct_drop_min: 15,
@@ -136,7 +136,8 @@ if (process.argv[1] && process.argv[1].endsWith('analytics.js')) {
   console.assert(byDate.value1 === 150 && byDate.value2 === 150, 'date agg');
 
   console.assert(incidentDuration('09:00', '11:30') === 150, 'duration');
-  console.assert(incidentLevel(60, -100, rules) === 'P1', 'P1 total outage');
+  console.assert(incidentLevel(60, -100, rules) === 'P2', 'total outage 1h = P2 (V.5.0 p.27)');
+  console.assert(incidentLevel(150, -100, rules) === 'P1', 'total outage ≥2h = P1');
   console.assert(incidentLevel(200, -60, rules) === 'P1', 'P1 50% 3h');
   console.assert(incidentLevel(20, -30, rules) === 'P4', 'any drop >15min is P4');
   console.assert(incidentLevel(20, -60, rules) === 'P2', 'P2 50% >15min');
