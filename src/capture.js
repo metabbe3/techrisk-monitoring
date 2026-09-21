@@ -16,6 +16,22 @@ export class ComparisonCapture {
 
     await retry(() => this.#fillForm(entry), 3, 2000, 'fill comparison form');
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    // Wait for the compare to actually render: the legend/popup metric names
+    // embed day1 the moment it does. Heavy compares sometimes answer 200 with
+    // no data (site flake — then the chart stays on its live view) and the
+    // old flow scraped that stale chart and reported a misleading "date
+    // mismatch" (alert 2026-09-21). Fail with the real cause instead; the
+    // caller's retry usually lands the render.
+    try {
+      await page.waitForFunction((d) => document.body.innerText.includes(d), entry.from, {
+        timeout: 30000,
+      });
+    } catch {
+      await this.#screenshot(`${moduleCfg.key}_nocomparerender_${index}`, outputDir);
+      throw new Error(
+        `site never displayed the ${entry.from} comparison (query flaked / no data) — see ${moduleCfg.key}_nocomparerender screenshot`
+      );
+    }
 
     const found = await this.#hoverChartLink();
     if (!found) {
@@ -82,6 +98,18 @@ export class ComparisonCapture {
   async #fillForm(entry) {
     const page = this.page;
     await page.waitForSelector(COMPARE.modal, { timeout: 15000 });
+    // The chart auto-refreshes on a timer (site change ~2026-08-20): each tick
+    // re-queries the default/live window and re-renders it, clobbering the
+    // compare result before we scrape it — the compare XHR carries our dates
+    // while the popup shows defaults or an undated live view (alert
+    // 2026-09-21). "Stop Refresh" is shown only while the timer runs, so an
+    // absent button means auto-refresh is already off.
+    const stop = page.locator(COMPARE.stopRefresh);
+    if (await stop.waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false)) {
+      await stop.click(); // visible but not clickable = real failure, fail this attempt loudly
+    } else {
+      console.log('  [capture] Stop Refresh absent — auto-refresh already off (or older site)');
+    }
     await this.#setField(COMPARE.date1, entry.from, true);
     await this.#setField(COMPARE.date2, entry.to, true);
     await this.#setField(COMPARE.startTime, normalizeTime(entry.start));

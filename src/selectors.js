@@ -56,6 +56,8 @@ export const COMPARE = {
   startTime: 'input[ng-model="queryInfo.startTime"]',
   endTime: 'input[ng-model="queryInfo.endTime"]',
   compareBtn: 'button[ng-click="compare()"]',
+  // Chart auto-refresh toggle pair — "Stop Refresh" is shown while the timer runs.
+  stopRefresh: 'button[ng-click="stopFreshChange()"]',
 };
 
 export const POPUP = {
