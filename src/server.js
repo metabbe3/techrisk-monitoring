@@ -160,11 +160,11 @@ function listRuns() {
         task: meta.task,
         generatedAt: meta.generatedAt,
         running: false,
-        entries: {
-          ...(windows[0] || {}),
+        entries: windows.length ? {
+          ...windows[0],
           modules: [...new Set(meta.results?.map((r) => r.module) || [])],
           windows: [...new Map(windows.map((w) => [`${w.from}${w.to}${w.start}${w.end}`, w])).values()],
-        },
+        } : undefined, // stopped-before-first-module run: no windows to describe
         summaries: meta.summaries?.map(({ rules, ...s }) => s) || [],
       });
     }
